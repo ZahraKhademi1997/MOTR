@@ -28,7 +28,7 @@ from util.plot_utils import draw_boxes, draw_ref_pts, image_hwc2chw
 from datasets.coco_eval import CocoEvaluator
 from datasets.panoptic_eval import PanopticEvaluator
 from datasets.data_prefetcher import data_prefetcher, data_dict_to_cuda
-
+from torch.utils.tensorboard import SummaryWriter
 
 def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
@@ -91,8 +91,11 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 def train_one_epoch_mot(model: torch.nn.Module, criterion: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
                     device: torch.device, epoch: int, max_norm: float = 0):
+    # print("Entered train_one_epoch_mot in engine")
     model.train()
+    # print('model.train in engine')
     criterion.train()
+    # print('criterion.train in engine')
     metric_logger = utils.MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
     # metric_logger.add_meter('class_error', utils.SmoothedValue(window_size=1, fmt='{value:.2f}'))
@@ -100,39 +103,92 @@ def train_one_epoch_mot(model: torch.nn.Module, criterion: torch.nn.Module,
     header = 'Epoch: [{}]'.format(epoch)
     print_freq = 10
 
+    # Dictionary to accumulate loss values for each key over iterations
+    loss_accumulator = {key: 0.0 for key in criterion.weight_dict.keys()}
+    
+    #####################################################################
+    # () Defining function to log gradient of different part of the model 
+    writer = SummaryWriter('/home/zahra/Documents/Projects/prototype/MOTR-codes/new/MOTR-main/output/logs') 
+    def log_gradients(model, writer, epoch, iteration):
+        # Check if the model is wrapped in DistributedDataParallel
+        if isinstance(model, torch.nn.parallel.DistributedDataParallel):
+            model = model.module
+
+        modules = {
+            'backbone': model.backbone,
+            'encoder': model.transformer.encoder,
+            'decoder': model.transformer.decoder,
+            'input_proj': model.input_proj,
+            'bbox_attention': model.bbox_attention,
+            'mask_head': model.mask_head
+        }
+
+        for name, module in modules.items():
+            total_grad_norm = 0
+            for param in module.parameters():
+                if param.grad is not None:
+                    total_grad_norm += param.grad.data.norm(2).item()
+            writer.add_scalar(f'grad_norm/{name}', total_grad_norm, epoch * len(data_loader) + iteration)
+
+    iteration = 0
+    #####################################################################
+            
     # for samples, targets in metric_logger.log_every(data_loader, print_freq, header):
     for data_dict in metric_logger.log_every(data_loader, print_freq, header):
         data_dict = data_dict_to_cuda(data_dict, device)
         outputs = model(data_dict)
-
-
         loss_dict = criterion(outputs, data_dict)
-        # print("iter {} after model".format(cnt-1))
         weight_dict = criterion.weight_dict
+        for key, value in loss_dict.items():
+            value.requires_grad_(True)
         losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
-
+        losses.requires_grad_(True) 
+        
         # reduce losses over all GPUs for logging purposes
         loss_dict_reduced = utils.reduce_dict(loss_dict)
         # loss_dict_reduced_unscaled = {f'{k}_unscaled': v
         #                               for k, v in loss_dict_reduced.items()}
+        
+        
         loss_dict_reduced_scaled = {k: v * weight_dict[k]
                                     for k, v in loss_dict_reduced.items() if k in weight_dict}
+        
         losses_reduced_scaled = sum(loss_dict_reduced_scaled.values())
-
+        # print('#$#$#$#$#$#$#$#$#$#$losses reduced value in engine.py is:', losses_reduced_scaled)
         loss_value = losses_reduced_scaled.item()
 
         if not math.isfinite(loss_value):
             print("Loss is {}, stopping training".format(loss_value))
             print(loss_dict_reduced)
             sys.exit(1)
-
+        
         optimizer.zero_grad()
         losses.backward()
+        
+        ########################################################################
+        # () Logging gradients
+        log_gradients(model, writer, epoch, iteration)
+        ########################################################################
+        
+        ################################################### 
+        # ()
+        # for name, param in model.named_parameters():
+        #     if param.requires_grad and param.grad is not None:
+        #         print(f"Gradient for {name}: {param.grad.norm().item()}")  # Print the norm of the gradients
+        #     else:
+        #         print(f"No gradient or not trainable for {name}")
+
+        ################################################### 
+        
         if max_norm > 0:
             grad_total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
         else:
             grad_total_norm = utils.get_total_grad_norm(model.parameters(), max_norm)
         optimizer.step()
+        
+        
+        for key, value in loss_dict.items():
+            loss_accumulator[key] += value.item()
 
         # metric_logger.update(loss=loss_value, **loss_dict_reduced_scaled, **loss_dict_reduced_unscaled)
         metric_logger.update(loss=loss_value, **loss_dict_reduced_scaled)
@@ -140,9 +196,10 @@ def train_one_epoch_mot(model: torch.nn.Module, criterion: torch.nn.Module,
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
         metric_logger.update(grad_norm=grad_total_norm)
         # gather the stats from all processes
-
+        iteration+=1
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
+    writer.close()
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
 

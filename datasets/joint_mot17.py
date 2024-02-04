@@ -1,5 +1,4 @@
 
-
 """
 MOT dataset which returns image_id for evaluation.
 """
@@ -22,7 +21,7 @@ import os
 import datetime
 import random
 import torchvision.transforms.functional as F
-import numpy as np
+
 
 class DetMOTDetection:
     def __init__(self, args, data_txt_path: str, seqs_folder, dataset2transform):
@@ -34,15 +33,26 @@ class DetMOTDetection:
         self.vis = args.vis
         self.video_dict = {}
         
+        #####################################################################################
+        # (1) Only keep the files that have the msk annotations
+        sequences_to_keep = ['MOT17-02-DPM', 'MOT17-05-DPM','MOT17-09-DPM', 'MOT17-11-DPM','MOT17-02-SDP', 'MOT17-05-SDP','MOT17-09-SDP', 'MOT17-11-SDP', 'MOT17-02-FRCNN', 'MOT17-05-FRCNN','MOT17-09-FRCNN', 'MOT17-11-FRCNN']
+        
         with open(data_txt_path, 'r') as file:
+            #####################################################################################
+            # (2) 
             self.img_files = file.readlines()
             self.img_files = [osp.join(seqs_folder, x.strip()) for x in self.img_files]
             self.img_files = list(filter(lambda x: len(x) > 0, self.img_files))
+            self.img_files = [x.split(',')[0] for x in self.img_files]
+            self.img_files = [x for x in self.img_files if any(seq in x for seq in sequences_to_keep)]
 
-        # self.label_files = [(x.replace('images', 'labels_with_ids').replace('.png', '.txt').replace('.jpg', '.txt'))
-        #                     for x in self.img_files]
-        self.mask_files = [(x.replace('images', 'instances'))
+        self.label_files = [(x.replace('images', 'labels_with_ids').replace('.png', '.txt').replace('.jpg', '.txt'))
                             for x in self.img_files]
+        ############################################################################################################
+        # (2) Adding mask directory
+        self.mask_files = [(x.replace('images', 'masks_with_ids').replace('.png', '.txt').replace('.jpg', '.txt'))
+                            for x in self.img_files]
+        ############################################################################################################
         # The number of images per sample: 1 + (num_frames - 1) * interval.
         # The number of valid samples: num_images - num_image_per_sample + 1.
         self.item_num = len(self.img_files) - (self.num_frames_per_batch - 1) * self.sample_interval
@@ -65,7 +75,7 @@ class DetMOTDetection:
             self.current_epoch = 0
 
     def _register_videos(self):
-        for label_name in self.mask_files:
+        for label_name in self.label_files:
             video_name = '/'.join(label_name.split('/')[:-1])
             if video_name not in self.video_dict:
                 # print("register {}-th video: {} ".format(len(self.video_dict) + 1, video_name))
@@ -91,9 +101,10 @@ class DetMOTDetection:
 
     @staticmethod
     def _targets_to_instances(targets: dict, img_shape) -> Instances:
+        
         gt_instances = Instances(tuple(img_shape))
         ##############################################################################################
-        # (1)
+        # (3)
         gt_instances.masks = targets['masks']
         ##############################################################################################
         gt_instances.boxes = targets['boxes']
@@ -102,30 +113,42 @@ class DetMOTDetection:
         gt_instances.area = targets['area']
         return gt_instances
 
-    
     ########################################################################################
-    # (2) Rewritting function to convert gt_masks to gt_bboxes
+    # (4) Changing the function to convert the masks to bboxes
     def _pre_single_frame(self, idx: int):
         img_path = self.img_files[idx]
-        mask_path = self.mask_files[idx]
+        label_path = self.label_files[idx]
+        ####################################
+        # (5) Adding mask directory
+        mask_path =  self.mask_files[idx]
+        ####################################
         if 'crowdhuman' in img_path:
             img_path = img_path.replace('.jpg', '.png')
         img = Image.open(img_path)
         targets = {}
-        w, h = img.size
-        assert w > 0 and h > 0, f"Invalid image {img_path} with shape {w}x{h}"
+        w, h = img._size
+        assert w > 0 and h > 0, "invalid image {} with shape {} {}".format(img_path, w, h)
         
-        video_name = '/'.join(mask_path.split('/')[:-1])
-        obj_idx_offset = self.video_dict[video_name] * 1000000
-        
+        video_name = '/'.join(label_path.split('/')[:-1])
+        obj_idx_offset = self.video_dict[video_name] * 1000000  # 1000000 unique ids is enough for a video.
         if 'crowdhuman' in img_path:
             targets['dataset'] = 'CrowdHuman'
         elif 'MOT17' in img_path:
             targets['dataset'] = 'MOT17'
-        elif 'APPLE_MOTS' in img_path:
-            targets['dataset'] = 'APPLE_MOTS'
         else:
             raise NotImplementedError()
+        
+        # if osp.isfile(label_path):
+        #     labels0 = np.loadtxt(label_path, dtype=np.float32).reshape(-1, 7)
+
+        #     # normalized cewh to pixel xyxy format
+        #     labels = labels0.copy()
+        #     labels[:, 2] = w * (labels0[:, 2] - labels0[:, 4] / 2)
+        #     labels[:, 3] = h * (labels0[:, 3] - labels0[:, 5] / 2)
+        #     labels[:, 4] = w * (labels0[:, 2] + labels0[:, 4] / 2)
+        #     labels[:, 5] = h * (labels0[:, 3] + labels0[:, 5] / 2)
+        # else:
+        #     raise ValueError('invalid label path: {}'.format(label_path))
         
         targets['boxes'] = []
         targets['area'] = []
@@ -133,43 +156,51 @@ class DetMOTDetection:
         targets['labels'] = []
         targets['obj_ids'] = []
         targets['masks'] = []
-        targets['image_id'] = torch.as_tensor([idx])
+        targets['image_id'] = torch.as_tensor(idx)
         targets['size'] = torch.as_tensor([h, w])
         targets['orig_size'] = torch.as_tensor([h, w])
-        
-        # Load masks from image files
-        mask_img = Image.open(mask_path)
-        mask_np = np.array(mask_img)
-        obj_ids = np.unique(mask_np)
-        
-        # Process each object in the mask
-        for obj_id in obj_ids:
-            if obj_id == 0:  # Assuming 0 is the background
-                continue
-            
-            obj_mask = (mask_np == obj_id).astype(np.uint8)
-            pos = np.where(obj_mask)
-            xmin = np.min(pos[1])
-            xmax = np.max(pos[1])
-            ymin = np.min(pos[0])
-            ymax = np.max(pos[0])
-            bbox = [xmin, ymin, xmax, ymax]
-            
-            targets['masks'].append(obj_mask)
-            targets['boxes'].append(bbox)
-            targets['area'].append((xmax - xmin) * (ymax - ymin))
-            targets['iscrowd'].append(0)
-            targets['labels'].append(0)  # Update this if you have label information
-            obj_id = obj_id + obj_idx_offset if obj_id >= 0 else obj_id
-            targets['obj_ids'].append(obj_id)
-        
-        # Convert lists to tensors
-        targets['boxes'] = torch.as_tensor(targets['boxes'], dtype=torch.float32).reshape(-1, 4)
+
+        if os.path.isfile(mask_path):
+            mask_objects = {}
+
+            with open(mask_path, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    fields = line.split(" ")
+                    object_id = int(fields[6])
+                    mask = mask_util.decode({'size': [int(fields[3]), int(fields[4])], 'counts': fields[5].encode()})
+
+                    # Calculate bbox from mask
+                    pos = np.where(mask)
+                    xmin = np.min(pos[1])
+                    xmax = np.max(pos[1])
+                    ymin = np.min(pos[0])
+                    ymax = np.max(pos[0])
+                    bbox = [xmin, ymin, xmax, ymax]
+                    # print(bbox)
+
+                    mask_objects[object_id] = {'mask': mask, 'bbox': bbox}
+
+            for object_id, data in mask_objects.items():
+                # print(data)
+                targets['masks'].append(data['mask'])
+                targets['boxes'].append(data['bbox'])
+                targets['area'].append((data['bbox'][2] - data['bbox'][0]) * (data['bbox'][3] - data['bbox'][1]))
+                targets['iscrowd'].append(0)
+                targets['labels'].append(0)  # Update this if you have label information
+                obj_id = object_id + obj_idx_offset if object_id >= 0 else object_id
+                targets['obj_ids'].append(obj_id)
+
+        assert len(targets['masks']) == len(targets['boxes']), "Mismatch in number of masks and bboxes"
+    
         targets['area'] = torch.as_tensor(targets['area'])
         targets['iscrowd'] = torch.as_tensor(targets['iscrowd'])
         targets['labels'] = torch.as_tensor(targets['labels'])
         targets['obj_ids'] = torch.as_tensor(targets['obj_ids'])
-        targets['masks'] = torch.stack([torch.tensor(m, dtype=torch.uint8) for m in targets['masks']])
+        targets['boxes'] = torch.as_tensor(targets['boxes'], dtype=torch.float32).reshape(-1, 4)
+        masks_np = np.array(targets['masks'])
+        targets['masks'] = torch.as_tensor(masks_np, dtype=torch.uint8)
+        # assert len(targets['masks']) == len(targets['boxes'])
         
         return img, targets
     ########################################################################################
@@ -190,27 +221,35 @@ class DetMOTDetection:
         images = []
         for i in range(start, end, interval):
             img_i, targets_i = self._pre_single_frame(i)
+            
             images.append(img_i)
             targets.append(targets_i)
-            
+    
         return images, targets
     
 
     def __getitem__(self, idx):
         sample_start, sample_end, sample_interval = self._get_sample_range(idx)
         images, targets = self.pre_continuous_frames(sample_start, sample_end, sample_interval)
+        # Check targets before transformation
         
         data = {}
         dataset_name = targets[0]['dataset']
         transform = self.dataset2transform[dataset_name]
+        
+        # for t in targets:
+        #     print(f"Before transform: masks={len(t['masks'])}, boxes={len(t['boxes'])}")
             
         if transform is not None:
             images, targets = transform(images, targets)
             
+            # Check targets after transformation
+            # for t in targets:
+            #     print(f"After transform: masks={len(t['masks'])}, boxes={len(t['boxes'])}")
         gt_instances = []
         
-        ##########################################################################
-        # (3) Checking after transformation masks and bboxes equality 
+        #########################################################################
+        # (5) Checking bboxes and masks equality
         def plot_image_with_bboxes_and_masks(img, bboxes, masks, title):
             """
             Plots an image with bounding boxes and masks.
@@ -261,37 +300,28 @@ class DetMOTDetection:
             plt.title(title)
             file_name = title.replace('', '_') + '.png'
             # Save the figure
-            output_path = os.path.join('/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR-main/output/plot_check_joint', file_name)
+            output_path = os.path.join('/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR-main-MOT17/MOTR-main/output/plot_check_joint', file_name)
             plt.savefig(output_path)
             plt.close(fig)  # Close the figure to free memory
-                
-                ### For plotting ###
-                # Overlay the mask
-            #     ax.imshow(np.ma.masked_where(mask == 0, mask), cmap='spring', alpha=0.5)
-
-            # plt.title(title)
-            # plt.show()
-        ##########################################################################
+        #########################################################################
         
         filtered_gt_instances = []
         filtered_images = []
+        
         for img_i, targets_i in zip(images, targets):
             
             #############################################################################
-            # (4) Checking masks and bboxes equality
+            # (6) Checking the bboxes and masks equality after transform
             # print('target_i before is:', targets_i)
             # if len(targets_i['masks']) != len(targets_i['boxes']):
             #     lengths = {field: len(targets_i[field]) for field in ['boxes', 'labels', 'obj_ids', 'area', 'iscrowd', 'masks']}
             #     print(f"Field lengths in frame {idx}: {lengths}")
                 # plot_image_with_bboxes_and_masks(img_i, targets_i['boxes'], targets_i['masks'], f"Frame {idx}")
-            
-            
-            #############################################################################
-            # (5) Making number of masks and bboxes equal
+
             if len(targets_i['masks']) != len(targets_i['boxes']):
                 print(f'Before equalizing - Frame: Masks={len(targets_i["masks"])}, Boxes={len(targets_i["boxes"])}, Labels = {len(targets_i["labels"])}')
                 # plot_image_with_bboxes_and_masks(img_i, targets_i['boxes'], targets_i['masks'], f"Before-Frame {idx}")
-                
+
                 def create_bbox_from_mask(mask):
                     pos = np.where(mask)
                     xmin = np.min(pos[1])
@@ -367,10 +397,9 @@ class DetMOTDetection:
                 targets_i['obj_ids'] = torch.as_tensor(new_obj_ids, dtype=torch.int64)
                 targets_i['area'] = torch.as_tensor(new_area, dtype=torch.float32)
                 targets_i['iscrowd'] = torch.as_tensor(new_iscrowd, dtype=torch.int64)
-                masks_np = np.stack([mask.numpy() for mask in new_masks])
+                masks_np = [mask.numpy() for mask in new_masks]
                 targets_i['masks'] = torch.as_tensor(masks_np, dtype=torch.uint8)
 
-                
                 # plot_image_with_bboxes_and_masks(img_i, targets_i['boxes'], targets_i['masks'], f"After-Frame {idx}")
                 print(f'After equalizing - Frame: Masks={len(targets_i["masks"])}, Boxes={len(targets_i["boxes"])}') 
             
@@ -379,7 +408,7 @@ class DetMOTDetection:
                 lengths = {field: len(targets_i[field]) for field in ['boxes', 'labels', 'obj_ids', 'area', 'iscrowd', 'masks']}
                 print(f"Field lengths in frame {idx}: {lengths}")
                 # plot_image_with_bboxes_and_masks(img_i, targets_i['boxes'], targets_i['masks'], f"Frame {idx}")
-            #############################################################################  
+             #############################################################################   
                 
             gt_instances_i = self._targets_to_instances(targets_i, img_i.shape[1:3])
             gt_instances.append(gt_instances_i)
@@ -404,40 +433,7 @@ class DetMOTDetectionValidation(DetMOTDetection):
 
 
 
-def make_transforms_for_mot17(image_set, args=None):
-
-    normalize = T.MotCompose([
-        T.MotToTensor(),
-        T.MotNormalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-    ])
-    scales = [608, 640, 672, 704, 736, 768, 800, 832, 864, 896, 928, 960, 992]
-
-    if image_set == 'train':
-        return T.MotCompose([
-            T.MotRandomHorizontalFlip(),
-            T.MotRandomSelect(
-                T.MotRandomResize(scales, max_size=1536),
-                T.MotCompose([
-                    T.MotRandomResize([400, 500, 600]),
-                    T.FixedMotRandomCrop(384, 600),
-                    T.MotRandomResize(scales, max_size=1536),
-                ])
-            ),
-            normalize,
-        ])
-
-    if image_set == 'val':
-        return T.MotCompose([
-            T.MotRandomResize([800], max_size=1333),
-            normalize,
-        ])
-
-    raise ValueError(f'unknown {image_set}')
-
-
-###############################################################################
-# (6) Adding data augmentation for AppleMOTS
-# def make_transforms_for_applemots(image_set, args=None):
+# def make_transforms_for_mot17(image_set, args=None):
 
 #     normalize = T.MotCompose([
 #         T.MotToTensor(),
@@ -466,9 +462,9 @@ def make_transforms_for_mot17(image_set, args=None):
 #         ])
 
 #     raise ValueError(f'unknown {image_set}')
-###############################################################################
 
-def make_transforms_for_applemots(image_set, args=None):
+
+def make_transforms_for_mot17(image_set, args=None):
     
     ##########################################################################
     # (7) Defining custom cropping
@@ -603,7 +599,7 @@ def make_transforms_for_applemots(image_set, args=None):
                     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S%f")
 
                     # Save the image that did not contain any valid bbox after all attempts
-                    save_failed_image_path = "/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR-main/output/customcropping"  
+                    save_failed_image_path = "/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR-main-MOT17/MOTR-main/output/customcropping"  
                     failed_image_filename = f"failed_image_{img_idx}_{timestamp}.png"  # Include timestamp in the filename
                     failed_image_full_path = os.path.join(save_failed_image_path, failed_image_filename)
 
@@ -615,7 +611,7 @@ def make_transforms_for_applemots(image_set, args=None):
             return cropped_images, cropped_targets_list
     ##########################################################################
     
-    save_path = "/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR-main/output/data_aug"
+    save_path = "/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR-main-MOT17/MOTR-main/output/data_aug"
     if not os.path.exists(save_path):
         os.mkdir(save_path)
     
@@ -645,6 +641,9 @@ def make_transforms_for_applemots(image_set, args=None):
                 colored_mask = (colored_mask * 255).astype(np.uint8)  # Scale to 0-255 range
                 # if img_with_annotations.shape[:2] != colored_mask.shape[:2]:
                 #     colored_mask = resize_mask(colored_mask, img_with_annotations.shape[:2])
+
+                # print(img_with_annotations.shape, colored_mask.shape)
+                # print(img_with_annotations.shape)
 
                 # Blend the colored mask with the image
                 img_with_annotations = cv2.addWeighted(img_with_annotations, 1.0, colored_mask, 0.5, 0)
@@ -678,6 +677,7 @@ def make_transforms_for_applemots(image_set, args=None):
                 # print(f"--- Applying sub-transform {sub_transform.__class__.__name__} in {stage} ---")
                 image, targets = sub_transform(image, targets)
                 # debug_transform(targets, sub_transform.__class__.__name__, "after", image)
+                
                 # save_image_with_bboxes_and_masks(image, targets, f"{stage}_final", save_path)
                
         else:
@@ -702,7 +702,7 @@ def make_transforms_for_applemots(image_set, args=None):
             ("MotCompose", T.MotCompose([
                     T.MotRandomResize([400, 500, 600]),
                     ####################################################
-                    # (8) Adding a custom crop function
+                    # () Adding a custom crop function
                     # T.FixedMotRandomCrop(384, 600),
                     CustomFixedRandomCrop((384, 600)),
                     ####################################################
@@ -725,7 +725,8 @@ def make_transforms_for_applemots(image_set, args=None):
         ])
 
     raise ValueError(f'unknown {image_set}')
-        
+
+
 
 def make_transforms_for_crowdhuman(image_set, args=None):
 
@@ -765,23 +766,8 @@ def build_dataset2transform(args, image_set):
     mot17_test = make_transforms_for_mot17('val', args)
 
     crowdhuman_train = make_transforms_for_crowdhuman('train', args)
-    
-    ###############################################################################
-    # (9) Adding AppleMOTS
-    applemots_train = make_transforms_for_applemots('train', args)
-    applemots_val = make_transforms_for_applemots('val', args)
-    ###############################################################################
-    
-    
-    ###########################################################################################
-    # (10) Adding AppleMOTS
-    # dataset2transform_train = {'MOT17': mot17_train, 'CrowdHuman': crowdhuman_train}
-    # dataset2transform_val = {'MOT17': mot17_test, 'CrowdHuman': mot17_test}
-    
-    dataset2transform_train = {'MOT17': mot17_train, 'CrowdHuman': crowdhuman_train, 'APPLE_MOTS':applemots_train}
-    dataset2transform_val = {'MOT17': mot17_test, 'CrowdHuman': mot17_test, 'APPLE_MOTS':applemots_val}
-     ###########################################################################################
-    
+    dataset2transform_train = {'MOT17': mot17_train, 'CrowdHuman': crowdhuman_train}
+    dataset2transform_val = {'MOT17': mot17_test, 'CrowdHuman': mot17_test}
     if image_set == 'train':
         return dataset2transform_train
     elif image_set == 'val':
@@ -801,5 +787,4 @@ def build(image_set, args):
         data_txt_path = args.data_txt_path_val
         dataset = DetMOTDetection(args, data_txt_path=data_txt_path, seqs_folder=root, dataset2transform=dataset2transform)
     return dataset
-
 
