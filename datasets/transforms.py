@@ -43,9 +43,13 @@ def crop_mot(image, target, region):
         fields.append("boxes")
 
     if "masks" in target:
-        # FIXME should we update the area here if there are no boxes?
-        target['masks'] = target['masks'][:, i:i + h, j:j + w]
-        fields.append("masks")
+        ##################################################################################
+        # (1)
+        if target["masks"].shape[0] != 0:
+            # FIXME should we update the area here if there are no boxes?
+            target['masks'] = target['masks'][:, i:i + h, j:j + w]
+            fields.append("masks")
+        ##################################################################################
 
     # remove elements for which the boxes or masks that have zero area
     if "boxes" in target or "masks" in target:
@@ -225,11 +229,34 @@ def resize(image, target, size, max_size=None):
 
     h, w = size
     target["size"] = torch.tensor([h, w])
-
+    ################################################################################################################
+    # (2)
+    # if "masks" in target:
+    #     target['masks'] = interpolate(
+    #         target['masks'][:, None].float(), size, mode="nearest")[:, 0] > 0.5
     if "masks" in target:
-        target['masks'] = interpolate(
-            target['masks'][:, None].float(), size, mode="nearest")[:, 0] > 0.5
-
+        # print('target[masks][:, None] in transform has the shape of:', target['masks'][:, None].shape) # torch.Size([5, 1, 480, 640])
+        masks = target["masks"]
+        non_empty_masks = []
+        masks = masks.cpu()
+        for i in range(masks.shape[0]):
+            mask = masks[i]
+            if not torch.all(mask == 0):
+                non_empty_masks.append(mask)
+            else:
+                continue
+        if non_empty_masks:
+            masks = torch.stack(non_empty_masks, dim = 0)
+            interpolated_mask = interpolate(masks[None].float(), size, mode="nearest")[0] > 0.5
+            interpolated_mask = interpolated_mask.to(masks.device)
+        if non_empty_masks:
+            target["masks"] = interpolated_mask
+            # print('target[masks] while isnt empty has the shape of:', target["masks"].shape)
+        # else:
+        #     # If all masks were empty, remove the "masks" key from the target
+        #     target["masks"] = torch.empty((2, size[0], size[1]), dtype=torch.uint8)
+        #     print('target[masks] while is empty has the shape of:', target["masks"].shape)
+    ################################################################################################################
     return rescaled_image, target
 
 

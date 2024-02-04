@@ -1,12 +1,4 @@
-# ------------------------------------------------------------------------
-# Copyright (c) 2021 megvii-model. All Rights Reserved.
-# ------------------------------------------------------------------------
-# Modified from Deformable DETR (https://github.com/fundamentalvision/Deformable-DETR)
-# Copyright (c) 2020 SenseTime. All Rights Reserved.
-# ------------------------------------------------------------------------
-# Modified from DETR (https://github.com/facebookresearch/detr)
-# Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
-# ------------------------------------------------------------------------
+
 
 
 """
@@ -19,9 +11,16 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image
-
+import os
 import util.box_ops as box_ops
 from util.misc import NestedTensor, interpolate, nested_tensor_from_tensor_list
+
+import matplotlib.pyplot as plt
+import numpy as np
+
+from util.misc import (NestedTensor, nested_tensor_from_tensor_list,
+                       accuracy, get_world_size, interpolate, get_rank,
+                       is_dist_avail_and_initialized, inverse_sigmoid)
 
 try:
     from panopticapi.utils import id2rgb, rgb2id
@@ -30,9 +29,11 @@ except ImportError:
 
 
 class DETRsegm(nn.Module):
+    
     def __init__(self, detr, freeze_detr=False):
         super().__init__()
         self.detr = detr
+        # self.temp = temp
 
         if freeze_detr:
             for p in self.parameters():
@@ -40,35 +41,98 @@ class DETRsegm(nn.Module):
 
         hidden_dim, nheads = detr.transformer.d_model, detr.transformer.nhead
         self.bbox_attention = MHAttentionMap(hidden_dim, hidden_dim, nheads, dropout=0)
+        # (1) Changing [1024, 512, 256]
         self.mask_head = MaskHeadSmallConv(hidden_dim + nheads, [1024, 512, 256], hidden_dim)
-
-    def forward(self, samples: NestedTensor):
+        
+    # (2) Adding track_instances  to the forward function
+    # def forward(self, samples: NestedTensor):
+    def forward(self, samples: NestedTensor, track_instances):
         if not isinstance(samples, NestedTensor):
-            samples = nested_tensor_from_tensor_list(samples)
+                samples = nested_tensor_from_tensor_list(samples['imgs'])
+        
         features, pos = self.detr.backbone(samples)
-
         bs = features[-1].tensors.shape[0]
-
         src, mask = features[-1].decompose()
-        src_proj = self.detr.input_proj(src)
-        hs, memory = self.detr.transformer(src_proj, mask, self.detr.query_embed.weight, pos[-1])
 
-        outputs_class = self.detr.class_embed(hs)
-        outputs_coord = self.detr.bbox_embed(hs).sigmoid()
+        assert mask is not None
+        srcs = []
+        masks = []
+        for l, feat in enumerate(features):
+            src, mask = feat.decompose()
+            srcs.append(self.detr.input_proj[l](src))
+            masks.append(mask)
+            
+            assert mask is not None
+
+        if self.detr.num_feature_levels > len(srcs):
+            _len_srcs = len(srcs)
+            for l in range(_len_srcs, self.detr.num_feature_levels):
+                if l == _len_srcs:
+                    src = self.detr.input_proj[l](features[-1].tensors)# torch.Size([1, 256, 14, 24])
+                else:
+                    src = self.detr.input_proj[l](srcs[-1]) #torch.Size([1, 256, 14, 24])
+                m = samples.mask
+                mask = F.interpolate(m[None].float(), size=src.shape[-2:]).to(torch.bool)[0]
+                pos_l = self.detr.backbone[1](NestedTensor(src, mask)).to(src.dtype)
+                srcs.append(src)
+                masks.append(mask)  
+                pos.append(pos_l)
+                
+        # (3) Affecting track_instances in calculation
+        # hs,  init_reference, inter_references, enc_outputs_class, enc_outputs_coord_unact, memory = self.detr.transformer([srcs[3]], [masks[3]], [pos[3]],self.detr.query_embed.weight)
+        if track_instances is not None:
+            hs,  init_reference, inter_references, enc_outputs_class, enc_outputs_coord_unact, memory = self.detr.transformer([srcs[3]], [masks[3]], [pos[3]],track_instances.query_pos)
+        else:
+            hs,  init_reference, inter_references, enc_outputs_class, enc_outputs_coord_unact, memory = self.detr.transformer([srcs[3]], [masks[3]], [pos[3]],self.detr.query_embed.weight)
+        
+        hs = hs
+        init_reference = init_reference
+    
+        outputs_classes = []
+        outputs_coords = []
+        for lvl in range(hs.shape[0]):
+            if lvl == 0:
+                reference = init_reference
+            else:
+                reference = inter_references[lvl - 1]
+            reference = inverse_sigmoid(reference)
+            outputs_class = self.detr.class_embed[lvl](hs[lvl])
+            tmp = self.detr.bbox_embed[lvl](hs[lvl])
+            if reference.shape[-1] == 4:
+                tmp += reference
+            else:
+                assert reference.shape[-1] == 2
+                tmp[..., :2] += reference
+            outputs_coord = tmp.sigmoid()
+            outputs_classes.append(outputs_class)
+            outputs_coords.append(outputs_coord)
+        outputs_class = torch.stack(outputs_classes)
+        outputs_coord = torch.stack(outputs_coords)
+        
         out = {"pred_logits": outputs_class[-1], "pred_boxes": outputs_coord[-1]}
         if self.detr.aux_loss:
             out["aux_outputs"] = [
                 {"pred_logits": a, "pred_boxes": b} for a, b in zip(outputs_class[:-1], outputs_coord[:-1])
             ]
-
+        
         # FIXME h_boxes takes the last one computed, keep this in mind
-        bbox_mask = self.bbox_attention(hs[-1], memory, mask=mask)
-
-        seg_masks = self.mask_head(src_proj, bbox_mask, [features[2].tensors, features[1].tensors, features[0].tensors])
-        outputs_seg_masks = seg_masks.view(bs, self.detr.num_queries, seg_masks.shape[-2], seg_masks.shape[-1])
-
+        ##############################################################################
+        # (4) Changing the memory shape to calculate masks
+        bs, c, h, w = srcs[3].shape
+        memory = memory.view(bs, c, h, w)
+        ##############################################################################
+        
+        bbox_mask = self.bbox_attention(hs[-1], memory, mask=masks[3])
+        
+        # print('bbox_mask in segmenattion has the shape of:', bbox_mask.shape) #torch.Size([1, 310, 8, 14, 24])
+        seg_mask = self.mask_head(srcs[3], bbox_mask, [features[2].tensors, features[1].tensors, features[0].tensors])
+        
+        outputs_seg_masks = seg_mask.view(bs, outputs_coord[-1].shape[1], seg_mask.shape[-2], seg_mask.shape[-1])
+        # print('outputs_seg_masks in segmentation has the shape of:', outputs_seg_masks.shape) # torch.Size([1, 300, 88, 118])
         out["pred_masks"] = outputs_seg_masks
         return out
+
+
 
 
 class MaskHeadSmallConv(nn.Module):
@@ -105,11 +169,13 @@ class MaskHeadSmallConv(nn.Module):
                 nn.init.constant_(m.bias, 0)
 
     def forward(self, x, bbox_mask, fpns):
+        x = x
+        bbox_mask = bbox_mask
         def expand(tensor, length):
             return tensor.unsqueeze(1).repeat(1, int(length), 1, 1, 1).flatten(0, 1)
-
+        
         x = torch.cat([expand(x, bbox_mask.shape[1]), bbox_mask.flatten(0, 1)], 1)
-
+        
         x = self.lay1(x)
         x = self.gn1(x)
         x = F.relu(x)
@@ -165,6 +231,9 @@ class MHAttentionMap(nn.Module):
 
     def forward(self, q, k, mask=None):
         q = self.q_linear(q)
+        # print(q.device)  # Check the device of tensor 'q'
+        # print(self.q_linear.weight.device)  # Check the device of the model's weight
+
         k = F.conv2d(k, self.k_linear.weight.unsqueeze(-1).unsqueeze(-1), self.k_linear.bias)
         qh = q.view(q.shape[0], q.shape[1], self.num_heads, self.hidden_dim // self.num_heads)
         kh = k.view(k.shape[0], self.num_heads, self.hidden_dim // self.num_heads, k.shape[-2], k.shape[-1])
@@ -176,8 +245,27 @@ class MHAttentionMap(nn.Module):
         weights = self.dropout(weights)
         return weights
 
+################################################################################
+# (5) Modifying dice loss
+# def dice_loss(inputs, targets, num_boxes):
+#     """
+#     Compute the DICE loss, similar to generalized IOU for masks
+#     Args:
+#         inputs: A float tensor of arbitrary shape.
+#                 The predictions for each example.
+#         targets: A float tensor with the same shape as inputs. Stores the binary
+#                  classification label for each element in inputs
+#                 (0 for the negative class and 1 for the positive class).
+#     """
+#     inputs = inputs.sigmoid()
+#     inputs = inputs.flatten(1)
+#     numerator = 2 * (inputs * targets).sum(1)
+#     denominator = inputs.sum(-1) + targets.sum(-1)
+#     loss = 1 - (numerator + 1) / (denominator + 1)
+#     return loss.sum() / num_boxes
 
 def dice_loss(inputs, targets, num_boxes):
+    # print("Entered dice_loss segmentation")
     """
     Compute the DICE loss, similar to generalized IOU for masks
     Args:
@@ -189,13 +277,29 @@ def dice_loss(inputs, targets, num_boxes):
     """
     inputs = inputs.sigmoid()
     inputs = inputs.flatten(1)
-    numerator = 2 * (inputs * targets).sum(1)
-    denominator = inputs.sum(-1) + targets.sum(-1)
-    loss = 1 - (numerator + 1) / (denominator + 1)
-    return loss.sum() / num_boxes
+    targets = targets.flatten(1)
 
+    # Calculate the weights based on class appearances
+    smooth = 1.5
+    intersect = (inputs * targets).sum(1)
+    denominator = inputs.sum(1) + targets.sum(1)
+    
+    # Weights for each class
+    w = targets.sum(1) / denominator
+    w2 = 1 - w
+
+    # Compute weighted Dice loss
+    dice = (2.0 * intersect + smooth) / (inputs.sum(1) + targets.sum(1) + smooth)
+    dice_loss = 1 - dice
+    
+    # Apply weights
+    dice_loss = w2 * dice_loss
+    
+    return dice_loss.sum() / num_boxes
+################################################################################
 
 def sigmoid_focal_loss(inputs, targets, num_boxes, alpha: float = 0.25, gamma: float = 2, mean_in_dim1=True):
+    # print("Entered sigmoid_focal_loss segmentation")
     """
     Loss used in RetinaNet for dense detection: https://arxiv.org/abs/1708.02002.
     Args:
@@ -224,26 +328,39 @@ def sigmoid_focal_loss(inputs, targets, num_boxes, alpha: float = 0.25, gamma: f
     else:
         return loss.sum() / num_boxes
 
-
+################################################################################
+# (6) Modifying postprocessor to not cut the gradient
 class PostProcessSegm(nn.Module):
-    def __init__(self, threshold=0.5):
+    def __init__(self, threshold=0.2):
+        # print("Entered __init__ PostProcessSegm")
         super().__init__()
         self.threshold = threshold
 
-    @torch.no_grad()
+    # @torch.no_grad()
     def forward(self, results, outputs, orig_target_sizes, max_target_sizes):
+        # print("Entered forward PostProcessSegm")
+        # torch.cuda.empty_cache()
         assert len(orig_target_sizes) == len(max_target_sizes)
+        # print('orig_target_sizes', orig_target_sizes) # tensor([[108, 192]], device='cuda:0')
+        # print('max_target_sizes', max_target_sizes) # tensor([[ 864, 1536]], device='cuda:0')
         max_h, max_w = max_target_sizes.max(0)[0].tolist()
+        
         outputs_masks = outputs["pred_masks"].squeeze(2)
-        outputs_masks = F.interpolate(outputs_masks, size=(max_h, max_w), mode="bilinear", align_corners=False)
-        outputs_masks = (outputs_masks.sigmoid() > self.threshold).cpu()
 
-        for i, (cur_mask, t, tt) in enumerate(zip(outputs_masks, max_target_sizes, orig_target_sizes)):
-            img_h, img_w = t[0], t[1]
-            results[i]["masks"] = cur_mask[:, :img_h, :img_w].unsqueeze(1)
-            results[i]["masks"] = F.interpolate(
-                results[i]["masks"].float(), size=tuple(tt.tolist()), mode="nearest"
-            ).byte()
+        outputs_masks = F.interpolate(outputs_masks, size=(max_h, max_w), mode="bilinear", align_corners=False)
+        
+        # (7) Replacing hard threshold with soft one
+        # Hard thresholding
+        # results = (outputs_masks.sigmoid() > self.threshold)
+        # Soft thresholding
+        results = torch.sigmoid(outputs_masks / self.threshold)
+
+        # for i, (cur_mask, t, tt) in enumerate(zip(outputs_masks, max_target_sizes, orig_target_sizes)):
+        #     img_h, img_w = t[0], t[1]
+        #     results["masks"] = cur_mask[:, :img_h, :img_w].unsqueeze(1)
+        #     results["masks"] = F.interpolate(
+        #         results["masks"].float(), size=tuple(t.tolist()), mode="nearest"
+        #     ).byte()
 
         return results
 
