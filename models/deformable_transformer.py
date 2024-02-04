@@ -30,11 +30,17 @@ class DeformableTransformer(nn.Module):
                  num_encoder_layers=6, num_decoder_layers=6, dim_feedforward=1024, dropout=0.1,
                  activation="relu", return_intermediate_dec=False,
                  num_feature_levels=4, dec_n_points=4,  enc_n_points=4,
-                 two_stage=False, two_stage_num_proposals=300, decoder_self_cross=True, sigmoid_attn=False,
-                 local_self_attn=False, new_frame_adaptor=False):
+                 two_stage=False, two_stage_num_proposals=300, decoder_self_cross=True, sigmoid_attn=False
+                 ):
+    # def __init__(self, d_model=256, nhead=8,
+    #              num_encoder_layers=6, num_decoder_layers=6, dim_feedforward=1024, dropout=0.1,
+    #              activation="relu", return_intermediate_dec=False,
+    #              num_feature_levels=4, dec_n_points=4,  enc_n_points=4,
+    #              two_stage=False, two_stage_num_proposals=300, decoder_self_cross=True, sigmoid_attn=False,
+    #              local_self_attn=False, new_frame_adaptor=False):
         super().__init__()
 
-        self.new_frame_adaptor = None
+        # self.new_frame_adaptor = None
         self.d_model = d_model
         self.nhead = nhead
         self.two_stage = two_stage
@@ -49,7 +55,11 @@ class DeformableTransformer(nn.Module):
         decoder_layer = DeformableTransformerDecoderLayer(d_model, dim_feedforward,
                                                           dropout, activation,
                                                           num_feature_levels, nhead, dec_n_points, decoder_self_cross,
-                                                          sigmoid_attn=sigmoid_attn, local_self_attn=local_self_attn)
+                                                          sigmoid_attn=sigmoid_attn)
+        # decoder_layer = DeformableTransformerDecoderLayer(d_model, dim_feedforward,
+        #                                                   dropout, activation,
+        #                                                   num_feature_levels, nhead, dec_n_points, decoder_self_cross,
+        #                                                   sigmoid_attn=sigmoid_attn, local_self_attn=local_self_attn)
         self.decoder = DeformableTransformerDecoder(decoder_layer, num_decoder_layers, return_intermediate_dec)
 
         self.level_embed = nn.Parameter(torch.Tensor(num_feature_levels, d_model))
@@ -274,11 +284,14 @@ class DeformableTransformerEncoder(nn.Module):
 class DeformableTransformerDecoderLayer(nn.Module):
     def __init__(self, d_model=256, d_ffn=1024,
                  dropout=0.1, activation="relu",
-                 n_levels=4, n_heads=8, n_points=4, self_cross=True, sigmoid_attn=False, local_self_attn=False):
+                 n_levels=4, n_heads=8, n_points=4, self_cross=True, sigmoid_attn=False):
+    # def __init__(self, d_model=256, d_ffn=1024,
+    #             dropout=0.1, activation="relu",
+    #             n_levels=4, n_heads=8, n_points=4, self_cross=True, sigmoid_attn=False, local_self_attn=False):
         super().__init__()
 
         self.self_cross = self_cross
-        self.local_self_attn = local_self_attn
+        # self.local_self_attn = local_self_attn
         self.num_head = n_heads
         # cross attention
         self.cross_attn = MSDeformAttn(d_model, n_levels, n_heads, n_points, sigmoid_attn=sigmoid_attn)
@@ -439,8 +452,8 @@ def build_deforamble_transformer(args):
         two_stage_num_proposals=args.num_queries,
         decoder_self_cross=not args.decoder_cross_self,
         sigmoid_attn=args.sigmoid_attn,
-        local_self_attn=args.local_self_attn,
-        new_frame_adaptor=args.new_frame_adaptor,
+        # local_self_attn=args.local_self_attn,
+        # new_frame_adaptor=args.new_frame_adaptor,
     )
 
 

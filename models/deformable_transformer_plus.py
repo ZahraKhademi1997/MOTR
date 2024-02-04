@@ -148,6 +148,7 @@ class DeformableTransformer(nn.Module):
             mask = mask.flatten(1)
             pos_embed = pos_embed.flatten(2).transpose(1, 2)
             lvl_pos_embed = pos_embed + self.level_embed[lvl].view(1, 1, -1)
+            
             lvl_pos_embed_flatten.append(lvl_pos_embed)
             src_flatten.append(src)
             mask_flatten.append(mask)
@@ -157,9 +158,14 @@ class DeformableTransformer(nn.Module):
         spatial_shapes = torch.as_tensor(spatial_shapes, dtype=torch.long, device=src_flatten.device)
         level_start_index = torch.cat((spatial_shapes.new_zeros((1, )), spatial_shapes.prod(1).cumsum(0)[:-1]))
         valid_ratios = torch.stack([self.get_valid_ratio(m) for m in masks], 1)
-
-        # encoder
-        memory = self.encoder(src_flatten, spatial_shapes, level_start_index, valid_ratios, lvl_pos_embed_flatten, mask_flatten)
+        # print('spatial_shapes in deformbale_transformer_plus is:', spatial_shapes) #tensor([[108, 192], ...], device='cuda:0')
+        # print('valid_ratios in deformbale_transformer_plus is:', valid_ratios) #tensor([[[1., 1.]]], device='cuda:0')
+        # print('src_flatten in deformbale_transformer_plus is:', src_flatten.shape) #torch.Size([1, 20736, 256])
+        # print('mask_flatten in deformbale_transformer_plus is:', mask_flatten.shape) #torch.Size([1, 20736])
+        # print('level_start_index in deformbale_transformer_plus is:', level_start_index) #torch.Size([1, 20736, 256])
+        # print('lvl_pos_embed_flatten in deformbale_transformer_plus is:', lvl_pos_embed_flatten.shape) #tensor([0], device='cuda:0') -->tensor([    0, 20736], device='cuda:0') --> tensor([    0, 20736, 25920], device='cuda:0') -->tensor([    0, 20736, 25920, 27216], device='cuda:0')
+        
+        memory = self.encoder(src_flatten, spatial_shapes, level_start_index, valid_ratios, lvl_pos_embed_flatten, mask_flatten) # For bboxes
         # prepare input for decoder
         bs, _, c = memory.shape
         if self.two_stage:
@@ -194,7 +200,11 @@ class DeformableTransformer(nn.Module):
         inter_references_out = inter_references
         if self.two_stage:
             return hs, init_reference_out, inter_references_out, enc_outputs_class, enc_outputs_coord_unact
-        return hs, init_reference_out, inter_references_out, None, None
+        #######################################################################
+        # (1) Adding memory to output in format that segmentation head expected
+        # return hs, init_reference_out, inter_references_out, None, None
+        return hs, init_reference_out, inter_references_out, None, None, memory
+        #######################################################################
 
 
 class DeformableTransformerEncoderLayer(nn.Module):
