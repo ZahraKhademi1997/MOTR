@@ -21,17 +21,16 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 import datasets
-
+import torch.nn as nn
 from util.motdet_eval import motdet_evaluate, detmotdet_evaluate
 from util.tool import load_model
-# from util.render import visualization
 import util.misc as utils
 import datasets.samplers as samplers
 from datasets import build_dataset, get_coco_api_from_dataset
 from engine import evaluate, train_one_epoch, train_one_epoch_mot
 from models import build_model
 from torch.utils.tensorboard import SummaryWriter
-
+from torchviz import make_dot
 ################################################################################
 # () Tensorboard
 # from torch.utils.tensorboard import SummaryWriter
@@ -57,11 +56,25 @@ def get_args_parser():
     parser.add_argument('--lr_linear_proj_mult', default=0.1, type=float)
     #################################################################################
     # () Adding segmentation lr
-    parser.add_argument('--lr_segmentation_head_names', default=["bbox_attention", "mask_head"], type=str, nargs='+')
-    parser.add_argument('--lr_segmentation_head', default=1e-3, type=float)
+    # parser.add_argument('--lr_segmentation_bbox_attention_names', default=["bbox_attention", "mask_head"], type=str, nargs='+')
+    # parser.add_argument('--lr_segmentation_head', default=1e-4, type=float) # This value with SGD will prevent vanishing gradient descent but still the bbox_attention gradients are too small
+    
+    parser.add_argument('--lr_segmentation_bbox_attention_names', default=["bbox_attention"], type=str, nargs='+')
+    parser.add_argument('--lr_segmentation_bbox_attention', default=2e-4, type=float)
+    
+    parser.add_argument('--lr_segmentation_mask_head_names', default=["mask_head"], type=str, nargs='+')
+    parser.add_argument('--lr_segmentation_mask_head', default=2e-4, type=float)
     #################################################################################
     parser.add_argument('--batch_size', default=2, type=int)
+    ##################################################################################
+    # () Changing weight decay
     parser.add_argument('--weight_decay', default=1e-4, type=float)
+    # parser.add_argument('--main_weight_decay', default=1e-4, type=float)
+    # parser.add_argument('--backbone_weight_decay', default=1e-4, type=float)
+    # parser.add_argument('--linear_proj_mult_weight_decay', default=1e-4, type=float)
+    # parser.add_argument('--bbox_attention_weight_decay', default=5e-5, type=float)
+    # parser.add_argument('--mask_head_weight_decay', default=1e-4, type=float)
+    ##################################################################################
     parser.add_argument('--epochs', default=50, type=int)
     parser.add_argument('--lr_drop', default=40, type=int)
     parser.add_argument('--save_period', default=2, type=int)
@@ -139,10 +152,23 @@ def get_args_parser():
                         help="L1 box coefficient in the matching cost")
     parser.add_argument('--set_cost_giou', default=2, type=float,
                         help="giou box coefficient in the matching cost")
+    ############################################################################
+    # () Adding args for matcher
+    parser.add_argument('--set_cost_giou_mask_to_box', default=2, type=float,
+                        help="giou mask coefficient in the matching cost")
+    parser.add_argument('--set_cost_mask_dice', default=5, type=float,
+                        help="Dice loss mask coefficient in the matching cost")
+    parser.add_argument('--set_cost_mask_focal', default=2, type=float,
+                        help="Focal loss mask coefficient in the matching cost")
+    ############################################################################
 
     # * Loss coefficients
+    ###########################################################################
+    # () Adding masks loss coef
     parser.add_argument('--mask_loss_coef', default=5, type=float)
     parser.add_argument('--dice_loss_coef', default=5, type=float)
+    parser.add_argument('--cost_giou_mask_to_box_coef', default=2, type=float)
+    ###########################################################################
     parser.add_argument('--cls_loss_coef', default=2, type=float)
     parser.add_argument('--bbox_loss_coef', default=5, type=float)
     parser.add_argument('--giou_loss_coef', default=2, type=float)
@@ -218,7 +244,7 @@ def get_args_parser():
 def main(args):
     ############################################################################
     # () Logging
-    # writer = SummaryWriter(log_dir='/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR-main/outputs/logs')
+    writer = SummaryWriter(log_dir='/home/zahra/Documents/Projects/prototype/MOTR-codes/new/MOTR-main/output/logs')
     ############################################################################
     
     utils.init_distributed_mode(args)
@@ -241,7 +267,6 @@ def main(args):
     output_dir = "/home/zahra/Documents/Projects/prototype/MOTR-codes/new/MOTR-main/output/model.txt"
     with open (output_dir, 'w') as f:
         f.write (str(model))
-    # print(model)
 
     model_without_ddp = model
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -281,7 +306,45 @@ def main(args):
                 out = True
                 break
         return out
+    
+    
+    ##################################################################
+    # () Adding model to the tensorboard
+    # class ModelWrapper(nn.Module):
+    #     def __init__(self, model):
+    #         super().__init__()
+    #         self.model = model
 
+    #     def forward(self, x):
+    #         output = self.model(x)
+    #         if isinstance(output, dict):
+    #             return tuple(output.values())
+    #         return output
+    
+    # class ModelWrapper(nn.Module):
+    #     def __init__(self, model):
+    #         super().__init__()
+    #         self.model = model
+
+    #     def forward(self, x):
+    #         # x should be a dictionary
+    #         output = self.model(x)
+    #         if isinstance(output, dict):
+    #             return tuple(output.values())
+    #         return output
+        
+    # writer_model = SummaryWriter('/home/zahra/Documents/Projects/prototype/MOTR-codes/new/MOTR-main/output/logs_model')
+    # sample_batch = next(iter(data_loader_train))
+    # dummy_input = sample_batch
+    # # sample_images_list = sample_batch['imgs']
+    # # sample_image = sample_images_list[0]
+    # wrapped_model = ModelWrapper(model).to(device)
+    # traced_model = torch.jit.trace(wrapped_model, dummy_input, strict=False)
+    # writer_model.add_graph(traced_model, dummy_input)
+    ##################################################################
+    
+    ##################################################################################
+    # () Param_dict to train the whole model
     param_dicts = [
         {
             "params":
@@ -290,40 +353,91 @@ def main(args):
                  and not match_name_keywords(n, args.lr_linear_proj_names) 
                  #############################################################
                  # () Adding different learning rate for the segmentation head
-                 and not match_name_keywords(n, ["bbox_attention", "mask_head"])
+                 #  and not match_name_keywords(n, args.lr_segmentation_head_names)
+                 and not match_name_keywords(n, args.lr_segmentation_bbox_attention_names)
+                 and not match_name_keywords(n, args.lr_segmentation_mask_head_names)
                  #############################################################
                  and p.requires_grad],
             "lr": args.lr,
+            # "weight_decay": args.main_weight_decay,
         },
         {
             "params": [p for n, p in model_without_ddp.named_parameters() 
                        if match_name_keywords(n, args.lr_backbone_names) and p.requires_grad],
             "lr": args.lr_backbone,
+            # "weight_decay": args.backbone_weight_decay,
         },
         {
             "params": [p for n, p in model_without_ddp.named_parameters() 
                        if match_name_keywords(n, args.lr_linear_proj_names) and p.requires_grad],
             "lr": args.lr * args.lr_linear_proj_mult,
+            # "weight_decay": args.linear_proj_mult_weight_decay,
         },
         #############################################################################################
         # () Adding new learning rate for the segmentation head
+        # {
+        #     "params": [
+        #         p for n, p in model_without_ddp.named_parameters()
+        #         if match_name_keywords(n, args.lr_segmentation_head_names) and p.requires_grad
+        #     ],
+        #     "lr": args.lr_segmentation_head, 
+        # },
         {
             "params": [
                 p for n, p in model_without_ddp.named_parameters()
-                if match_name_keywords(n, args.lr_segmentation_head_names) and p.requires_grad
+                if match_name_keywords(n, args.lr_segmentation_bbox_attention_names) and p.requires_grad
             ],
-            "lr": args.lr_segmentation_head, 
+            "lr": args.lr_segmentation_bbox_attention, 
+            # "weight_decay": args.bbox_attention_weight_decay,
+        },
+        {
+            "params": [
+                p for n, p in model_without_ddp.named_parameters()
+                if match_name_keywords(n, args.lr_segmentation_mask_head_names) and p.requires_grad
+            ],
+            "lr": args.lr_segmentation_mask_head,
+            # "weight_decay": args.mask_head_weight_decay, 
         }
         #############################################################################################
     ]
+    ##################################################################################
+    
+    
+    ##################################################################################
+    # () Only train the seg_head
+    # param_dicts = [
+    #     {
+    #         "params": [
+    #             p for n, p in model_without_ddp.named_parameters()
+    #             if match_name_keywords(n, args.lr_segmentation_bbox_attention_names) and p.requires_grad
+    #         ],
+    #         "lr": args.lr_segmentation_bbox_attention, 
+    #         # "weight_decay": args.bbox_attention_weight_decay,
+    #     },
+    #     {
+    #         "params": [
+    #             p for n, p in model_without_ddp.named_parameters()
+    #             if match_name_keywords(n, args.lr_segmentation_mask_head_names) and p.requires_grad
+    #         ],
+    #         "lr": args.lr_segmentation_mask_head,
+    #         # "weight_decay": args.mask_head_weight_decay, 
+    #     }
+    # ]
+    ##################################################################################
+    
+    
     if args.sgd:
         optimizer = torch.optim.SGD(param_dicts, lr=args.lr, momentum=0.9,
                                     weight_decay=args.weight_decay)
     else:
         optimizer = torch.optim.AdamW(param_dicts, lr=args.lr,
                                       weight_decay=args.weight_decay)
-        
     
+    # if args.sgd:
+    #     optimizer = torch.optim.SGD(param_dicts,  momentum=0.9,)
+    # else:
+    #     optimizer = torch.optim.AdamW(param_dicts)
+        
         
         
     ##########################################################################
@@ -367,8 +481,8 @@ def main(args):
     if args.pretrained is not None:
         model_without_ddp = load_model(model_without_ddp, args.pretrained)
     
-    if args.play:
-        visualization(args, data_loader_train, "train")
+    # if args.play:
+    #     visualization(args, data_loader_train, "train")
         
     output_dir = Path(args.output_dir)
     if args.resume:
@@ -407,13 +521,12 @@ def main(args):
         if args.output_dir:
             utils.save_on_master(coco_evaluator.coco_eval["bbox"].eval, output_dir / "eval.pth")
         return
-
+    
     print("Start training")
     start_time = time.time()
 
     train_func = train_one_epoch
     if args.dataset_file in ['e2e_mot', 'e2e_dance', 'mot', 'ori_mot', 'e2e_static_mot', 'e2e_joint']:
-        print("Entered the training")
         train_func = train_one_epoch_mot
         dataset_train.set_epoch(args.start_epoch)
         dataset_val.set_epoch(args.start_epoch)
@@ -425,15 +538,15 @@ def main(args):
         
         ####################################################################################################
         # () Logging
-        # for key, value in train_stats.items():
-        #     writer.add_scalar(f'Training/{key}', value, epoch)
+        for key, value in train_stats.items():
+            writer.add_scalar(f'Training/{key}', value, epoch)
         ####################################################################################################
         
         lr_scheduler.step()
         if args.output_dir:
             checkpoint_paths = [output_dir / 'checkpoint.pth']
             # extra checkpoint before LR drop and every 5 epochs
-            if (epoch + 1) % args.lr_drop == 0 or (epoch + 1) % args.save_period == 0 or (((args.epochs >= 100 and (epoch + 1) > 100) or args.epochs < 100) and (epoch + 1) % 2 == 0):
+            if (epoch + 1) % args.lr_drop == 0 or (epoch + 1) % args.save_period == 0 or (((args.epochs >= 100 and (epoch + 1) > 100) or args.epochs < 100) and (epoch + 1) % 5 == 0):
                 checkpoint_paths.append(output_dir / f'checkpoint{epoch:04}.pth')
             for checkpoint_path in checkpoint_paths:
                 utils.save_on_master({
@@ -449,10 +562,10 @@ def main(args):
                 model, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir
             )
             #############################################################
-            # # Log validation metrics
-            # for key, value in test_stats.items():
-            #    writer.add_scalar(f'Validation/{key}', value, epoch)
-            # #############################################################
+            # Log validation metrics
+            for key, value in test_stats.items():
+               writer.add_scalar(f'Validation/{key}', value, epoch)
+            #############################################################
 
     
 
@@ -483,15 +596,15 @@ def main(args):
             dataset_val.step_epoch()
             
             
-        # ####################################################################################################
-        # # Log learning rate
-        # for i, group in enumerate(optimizer.param_groups):
-        #     writer.add_scalar(f'Learning_Rate/group_{i}', group['lr'], epoch)
-        # ####################################################################################################
+        ####################################################################################################
+        # Log learning rate
+        for i, group in enumerate(optimizer.param_groups):
+            writer.add_scalar(f'Learning_Rate/group_{i}', group['lr'], epoch)
+        ####################################################################################################
             
-        # ############################################################   
-        # writer.close()
-        # ############################################################  
+        ############################################################   
+        writer.close()
+        ############################################################  
             
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
