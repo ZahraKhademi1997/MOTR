@@ -68,6 +68,21 @@ def solve_PRW(root):
                 frames.append(os.path.join(dataset_path, 'images', frame_paths[i]))
     return frames
 
+######################################################################################################################
+# () SOLVING APPLEMOTS
+def solve_APPLEMOTS(root):
+    dataset_path = 'APPLEMOTS/train/images'
+    data_root = os.path.join(root, dataset_path)
+
+    frames = []
+    for folder_name in ['0000', '0001', '0002', '0003', '0004', '0005']:
+        image_folder = os.path.join(data_root, folder_name)
+        for img_name in sorted(os.listdir(image_folder)):
+            if img_name.endswith('.png'):
+                frames.append(os.path.join(dataset_path, folder_name, img_name))
+    return frames
+######################################################################################################################
+
 
 dataset_catalog = {
     'MOT15': partial(solve_MOT_train, year=15),
@@ -76,6 +91,7 @@ dataset_catalog = {
     'CUHK-SYSU': solve_CUHK,
     'ETHZ': solve_ETHZ,
     'PRW': solve_PRW,
+    'APPLE-MOTS' : solve_APPLEMOTS,
 }
 
 
