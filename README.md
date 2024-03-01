@@ -40,3 +40,9 @@ Logging learnign rates to tensorboard
 7. configs
 Adding applemots_one_node_train.sh for training on Hipergator
 '''
+
+'''
+8. Writing apple_eval.py
+Writing apple_eval.py for applemots evaluation
+
+'''
