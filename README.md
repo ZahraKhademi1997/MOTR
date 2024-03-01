@@ -18,4 +18,10 @@ Adding masks to the target instances
 Modifying data augmentation
 
 
+3. main.py
+Adding AppleMOTS data path
+
+4. transforms.py
+Modifying mask parts
+
 '''
