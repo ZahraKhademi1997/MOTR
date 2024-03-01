@@ -35,3 +35,8 @@ Logging gradients to tensorboard
 6. main.py
 Logging learnign rates to tensorboard
 '''
+
+'''
+7. configs
+Adding applemots_one_node_train.sh for training on Hipergator
+'''
