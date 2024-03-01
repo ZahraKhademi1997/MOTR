@@ -1,6 +1,4 @@
 '''
-DATALOADER
-
 1. datasets.datapath
 1.1. Writing gt_generation.py
 Generating gt.txt file from the mask images 
