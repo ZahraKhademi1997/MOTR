@@ -151,12 +151,19 @@ def get_args_parser():
     # end-to-end mot settings.
     parser.add_argument('--mot_path', default='/data/Dataset/mot', type=str)
     parser.add_argument('--input_video', default='figs/demo.mp4', type=str)
-    parser.add_argument('--data_txt_path_train',
-                        default='./datasets/data_path/detmot17.train', type=str,
+    # parser.add_argument('--data_txt_path_train',
+    #                     default='./datasets/data_path/detmot17.train', type=str,
+    #                     help="path to dataset txt split")
+    # parser.add_argument('--data_txt_path_val',
+    #                     default='./datasets/data_path/detmot17.train', type=str,
+    #                     help="path to dataset txt split")
+     parser.add_argument('--data_txt_path_train',
+                        default='./datasets/data_path/applemots.train', type=str,
                         help="path to dataset txt split")
     parser.add_argument('--data_txt_path_val',
-                        default='./datasets/data_path/detmot17.train', type=str,
+                        default='./datasets/data_path/applemots.val', type=str,
                         help="path to dataset txt split")
+    
     parser.add_argument('--img_path', default='data/valid/JPEGImages/')
 
     parser.add_argument('--query_interaction_layer', default='QIM', type=str,
