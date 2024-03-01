@@ -28,6 +28,7 @@ from util.plot_utils import draw_boxes, draw_ref_pts, image_hwc2chw
 from datasets.coco_eval import CocoEvaluator
 from datasets.panoptic_eval import PanopticEvaluator
 from datasets.data_prefetcher import data_prefetcher, data_dict_to_cuda
+from torch.utils.tensorboard import SummaryWriter
 
 
 def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
@@ -99,6 +100,32 @@ def train_one_epoch_mot(model: torch.nn.Module, criterion: torch.nn.Module,
     metric_logger.add_meter('grad_norm', utils.SmoothedValue(window_size=1, fmt='{value:.2f}'))
     header = 'Epoch: [{}]'.format(epoch)
     print_freq = 10
+    
+     #####################################################################
+    # () Defining function to log gradient of different part of the model 
+    writer_grad = SummaryWriter('/blue/hmedeiros/khademi.zahra/MOTR-train/original_MOTR_APPLEMOTS/MOTR-main/output/logs_grad') 
+    def log_gradients(model, writer_grad, epoch, iteration):
+        # Check if the model is wrapped in DistributedDataParallel
+        if isinstance(model, torch.nn.parallel.DistributedDataParallel):
+            model = model.module
+
+        modules = {
+            'backbone': model.backbone,
+            'position_embedding': model.backbone[1],
+            'encoder': model.transformer.encoder,
+            'decoder': model.transformer.decoder,
+            'input_proj': model.input_proj,
+        }
+
+        for name, module in modules.items():
+            total_grad_norm = 0
+            for param in module.parameters():
+                if param.grad is not None:
+                    total_grad_norm += param.grad.data.norm(2).item()
+            writer_grad.add_scalar(f'grad_norm/{name}', total_grad_norm, epoch * len(data_loader) + iteration)
+
+    iteration = 0
+    #####################################################################
 
     # for samples, targets in metric_logger.log_every(data_loader, print_freq, header):
     for data_dict in metric_logger.log_every(data_loader, print_freq, header):
@@ -128,6 +155,12 @@ def train_one_epoch_mot(model: torch.nn.Module, criterion: torch.nn.Module,
 
         optimizer.zero_grad()
         losses.backward()
+        
+        ########################################################################
+        # () Logging gradients
+        log_gradients(model, writer_grad, epoch, iteration)
+        ########################################################################
+        
         if max_norm > 0:
             grad_total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
         else:
@@ -141,8 +174,10 @@ def train_one_epoch_mot(model: torch.nn.Module, criterion: torch.nn.Module,
         metric_logger.update(grad_norm=grad_total_norm)
         # gather the stats from all processes
 
+        iteration+=1
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
+    writer_grad.close()
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
 

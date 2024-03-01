@@ -1,4 +1,5 @@
 '''
+DATALOADER
 
 1. datasets.datapath
 1.1. Writing gt_generation.py
@@ -24,4 +25,13 @@ Adding AppleMOTS data path
 4. transforms.py
 Modifying mask parts
 
+'''
+
+
+'''
+5. engine.py
+Logging gradients to tensorboard
+
+6. main.py
+Logging learnign rates to tensorboard
 '''

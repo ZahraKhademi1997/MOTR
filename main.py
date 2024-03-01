@@ -29,6 +29,7 @@ import datasets.samplers as samplers
 from datasets import build_dataset, get_coco_api_from_dataset
 from engine import evaluate, train_one_epoch, train_one_epoch_mot
 from models import build_model
+from torch.utils.tensorboard import SummaryWriter
 
 
 def get_args_parser():
@@ -188,6 +189,11 @@ def get_args_parser():
 
 
 def main(args):
+    ############################################################################
+    # () Logging
+    writer = SummaryWriter(log_dir='/blue/hmedeiros/khademi.zahra/MOTR-train/original_MOTR_APPLEMOTS/MOTR-main/output/logs')
+    ############################################################################
+    
     utils.init_distributed_mode(args)
     print("git:\n  {}\n".format(utils.get_sha()))
 
@@ -338,6 +344,14 @@ def main(args):
             sampler_train.set_epoch(epoch)
         train_stats = train_func(
             model, criterion, data_loader_train, optimizer, device, epoch, args.clip_max_norm)
+        
+        ####################################################################################################
+        # () Logging
+        for key, value in train_stats.items():
+            writer.add_scalar(f'Training/{key}', value, epoch)
+        ####################################################################################################
+        
+        
         lr_scheduler.step()
         if args.output_dir:
             checkpoint_paths = [output_dir / 'checkpoint.pth']
@@ -357,6 +371,12 @@ def main(args):
             test_stats, coco_evaluator = evaluate(
                 model, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir
             )
+            
+            #############################################################
+            # Log validation metrics
+            for key, value in test_stats.items():
+               writer.add_scalar(f'Validation/{key}', value, epoch)
+            #############################################################
 
             log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
                          **{f'test_{k}': v for k, v in test_stats.items()},
@@ -380,6 +400,18 @@ def main(args):
         if args.dataset_file in ['e2e_mot', 'e2e_dance', 'mot', 'ori_mot', 'e2e_static_mot', 'e2e_joint']:
             dataset_train.step_epoch()
             dataset_val.step_epoch()
+            
+        ####################################################################################################
+        # Log learning rate
+        for i, group in enumerate(optimizer.param_groups):
+            writer.add_scalar(f'Learning_Rate/group_{i}', group['lr'], epoch)
+        ####################################################################################################
+            
+        ############################################################   
+        writer.close()
+        ############################################################ 
+        
+        
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print('Training time {}'.format(total_time_str))
