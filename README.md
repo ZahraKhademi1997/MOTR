@@ -42,3 +42,8 @@ Adding args for masks in Loss coefficients
 7. misc.py
 Modifying import part to adjust for the current torchvision version
 '''
+
+'''
+8. segmentation.py
+Modifying PostProcessSegm function to incorporate in gradient.
+'''
