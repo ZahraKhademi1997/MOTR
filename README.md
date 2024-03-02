@@ -17,4 +17,5 @@ Outputing the feature map from the transformer encoder (memoey)
 '''
 5. motr.py
 5.1. Adding the segmentation head only
+5.2. Adding segmentation postprocessing head
 '''

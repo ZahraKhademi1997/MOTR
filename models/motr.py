@@ -473,7 +473,7 @@ class MOTR(nn.Module):
         hidden_dim, nheads = self.transformer.d_model, self.transformer.nhead
         self.bbox_attention = MHAttentionMap(hidden_dim, hidden_dim, nheads, dropout=0)
         self.mask_head = MaskHeadSmallConv(hidden_dim + nheads, [2048, 1024, 512], hidden_dim)
-        # self.postprocessor = PostProcessSegm(threshold = 0.2)
+        self.postprocessor = PostProcessSegm(threshold = 0.2)
         ##############################################
 
         mem_bank_len = self.mem_bank_len
