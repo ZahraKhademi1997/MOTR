@@ -45,6 +45,10 @@ Writing apple_eval.py for applemots evaluation
 '''
 
 '''
-9. Running
+9. misc.py
+Updating misc for torchvision
+'''
+'''
+10. Running
 /configs sbatch --j applemots_motr_bbox applemots_one_node_train.sh
 '''
