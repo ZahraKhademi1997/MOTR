@@ -469,7 +469,7 @@ def make_transforms_for_applemots(image_set, args=None):
     ##########################################################################
     # (9) Defining custom cropping
     class CustomFixedRandomCrop:
-        def __init__(self, crop_size, max_attempts=1000):
+        def __init__(self, crop_size, max_attempts=100000):
             self.crop_size = crop_size
             self.max_attempts = max_attempts
             
