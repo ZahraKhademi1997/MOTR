@@ -18,14 +18,15 @@ import torch
 import torch.nn.functional as F
 from torch import nn, Tensor
 from typing import List
-
+from util.box_ops import masks_to_boxes
 from util import box_ops, checkpoint
 from util.misc import (NestedTensor, nested_tensor_from_tensor_list,
                        accuracy, get_world_size, interpolate, get_rank,
                        is_dist_avail_and_initialized, inverse_sigmoid)
 
 from models.structures import Instances, Boxes, pairwise_iou, matched_boxlist_iou
-
+from .segmentation import (DETRsegm, PostProcessPanoptic, PostProcessSegm, MHAttentionMap, MaskHeadSmallConv,
+                           dice_loss, sigmoid_focal_loss)
 from .backbone import build_backbone
 from .matcher import build_matcher
 from .deformable_transformer_plus import build_deforamble_transformer
@@ -33,7 +34,8 @@ from .qim import build as build_query_interaction_layer
 from .memory_bank import build_memory_bank
 from .deformable_detr import SetCriterion, MLP
 from .segmentation import sigmoid_focal_loss
-
+import matplotlib.pyplot as plt
+import code
 
 class ClipMatcher(SetCriterion):
     def __init__(self, num_classes,
@@ -56,6 +58,11 @@ class ClipMatcher(SetCriterion):
         self.focal_loss = True
         self.losses_dict = {}
         self._current_frame_idx = 0
+        
+        # (5) Adding some notations for the forward function
+        self.mask_height = None
+        self.mask_width = None
+        
 
     def initialize_for_single_clip(self, gt_instances: List[Instances]):
         self.gt_instances = gt_instances
@@ -100,6 +107,10 @@ class ClipMatcher(SetCriterion):
             'labels': self.loss_labels,
             'cardinality': self.loss_cardinality,
             'boxes': self.loss_boxes,
+            
+            # (23) Adding loss_masks to dictionary
+            'masks': self.loss_masks,
+            
         }
         assert loss in loss_map, f'do you really want to compute {loss} loss?'
         return loss_map[loss](outputs, gt_instances, indices, num_boxes, **kwargs)
@@ -171,6 +182,49 @@ class ClipMatcher(SetCriterion):
             losses['class_error'] = 100 - accuracy(src_logits[idx], target_classes_o)[0]
 
         return losses
+    
+    
+    # (2) Adding loss_mask from deformable_detr to motr     
+    def loss_masks(self, outputs, gt_instances: List[Instances], indices, num_boxes):
+        """Compute the losses related to the masks: the focal loss and the dice loss.
+            targets dicts must contain the key "masks" containing a tensor of dim [nb_target_boxes, h, w]
+        """
+        assert "pred_masks" in outputs
+        
+        src_idx = self._get_src_permutation_idx(indices)
+        tgt_idx = self._get_tgt_permutation_idx(indices)
+        src_masks = outputs["pred_masks"].requires_grad_(True)
+        # print('src_masks before:', src_masks.shape) #src_masks before: torch.Size([1, 300, 960, 1500])
+        src_masks = src_masks[src_idx]
+        # print('src_masks after:', src_masks.shape) # src_masks after: torch.Size([23, 960, 1500])
+        masks = []
+        # print(gt_instances)
+        for t in gt_instances:
+            masks_field = t.get('masks')
+            masks.append(masks_field)
+        # TODO use valid to mask invalid areas due to padding in loss
+        target_masks, valid = nested_tensor_from_tensor_list(masks).decompose()
+        target_masks = target_masks.to(src_masks)
+        target_masks = target_masks[tgt_idx]
+        
+        out_mask_to_box = masks_to_boxes(src_masks)
+        tgt_mask_to_box = masks_to_boxes(target_masks)
+        
+        # upsample predictions to the target size
+        src_masks = interpolate(src_masks[:, None], size=target_masks.shape[-2:],
+                                mode="bilinear", align_corners=False)
+        src_masks = src_masks[:, 0].flatten(1)
+
+        target_masks = target_masks.flatten(1)
+        target_masks = target_masks.view(src_masks.shape)
+        losses = {
+            "loss_mask": sigmoid_focal_loss(src_masks, target_masks, num_boxes),
+            "loss_dice": dice_loss(src_masks, target_masks, num_boxes),
+        }
+        # print('losses masks are:', losses)
+        return losses
+    
+    
 
     def match_for_single_frame(self, outputs: dict):
         outputs_without_aux = {k: v for k, v in outputs.items() if k != 'aux_outputs'}
@@ -179,13 +233,20 @@ class ClipMatcher(SetCriterion):
         track_instances: Instances = outputs_without_aux['track_instances']
         pred_logits_i = track_instances.pred_logits  # predicted logits of i-th image.
         pred_boxes_i = track_instances.pred_boxes  # predicted boxes of i-th image.
-
+        
+        # (11) Adding pred_masks
+        pred_masks_i = track_instances.pred_masks  # predicted masks of i-th image.
+        
         obj_idxes = gt_instances_i.obj_ids
         obj_idxes_list = obj_idxes.detach().cpu().numpy().tolist()
         obj_idx_to_gt_idx = {obj_idx: gt_idx for gt_idx, obj_idx in enumerate(obj_idxes_list)}
         outputs_i = {
             'pred_logits': pred_logits_i.unsqueeze(0),
             'pred_boxes': pred_boxes_i.unsqueeze(0),
+            
+            # (12) Adding pred_masks
+            'pred_masks': pred_masks_i.unsqueeze(0),
+            
         }
 
         # step1. inherit and update the previous tracks.
@@ -229,14 +290,21 @@ class ClipMatcher(SetCriterion):
             src_idx = new_track_indices[0][0]
             tgt_idx = new_track_indices[0][1]
             # concat src and tgt.
+            
+            # (13) Solving device problem in qim
+            # new_matched_indices = torch.stack([unmatched_track_idxes[src_idx], untracked_tgt_indexes[tgt_idx]],
+            #                                   dim=1).to(pred_logits_i.device)
             new_matched_indices = torch.stack([unmatched_track_idxes[src_idx], untracked_tgt_indexes[tgt_idx]],
-                                              dim=1).to(pred_logits_i.device)
+                                              dim=1)
             return new_matched_indices
 
         # step4. do matching between the unmatched slots and GTs.
         unmatched_outputs = {
             'pred_logits': track_instances.pred_logits[unmatched_track_idxes].unsqueeze(0),
             'pred_boxes': track_instances.pred_boxes[unmatched_track_idxes].unsqueeze(0),
+            
+            # (14) Adding pred_masks
+            'pred_masks': track_instances.pred_masks[unmatched_track_idxes].unsqueeze(0),
         }
         new_matched_indices = match_for_single_decoder_layer(unmatched_outputs, self.matcher)
 
@@ -247,11 +315,24 @@ class ClipMatcher(SetCriterion):
         # step6. calculate iou.
         active_idxes = (track_instances.obj_idxes >= 0) & (track_instances.matched_gt_idxes >= 0)
         active_track_boxes = track_instances.pred_boxes[active_idxes]
+        
+        # (15) Adding active track masks
+        active_track_masks = track_instances.pred_masks[active_idxes]
+        
         if len(active_track_boxes) > 0:
             gt_boxes = gt_instances_i.boxes[track_instances.matched_gt_idxes[active_idxes]]
             active_track_boxes = box_ops.box_cxcywh_to_xyxy(active_track_boxes)
             gt_boxes = box_ops.box_cxcywh_to_xyxy(gt_boxes)
-            track_instances.iou[active_idxes] = matched_boxlist_iou(Boxes(active_track_boxes), Boxes(gt_boxes))
+            
+            # (17) Adding active track masks
+            # track_instances.iou[active_idxes] = matched_boxlist_iou(Boxes(active_track_boxes), Boxes(gt_boxes))
+            track_instances.iou_boxes[active_idxes] = matched_boxlist_iou(Boxes(active_track_boxes), Boxes(gt_boxes))
+            gt_masks = gt_instances_i.masks[track_instances.matched_gt_idxes[active_idxes]]
+            
+            gt_masks_to_boxes = box_ops.box_cxcywh_to_xyxy(masks_to_boxes(gt_masks.float())).to(active_track_masks.device)
+            active_track_masks_to_boxes = box_ops.box_cxcywh_to_xyxy(masks_to_boxes(active_track_masks)).to(active_track_masks.device)
+            track_instances.iou_masks[active_idxes] = matched_boxlist_iou(Boxes(active_track_masks_to_boxes), Boxes(gt_masks_to_boxes))
+            
 
         # step7. merge the unmatched pairs and the matched pairs.
         matched_indices = torch.cat([new_matched_indices, prev_matched_indices], dim=0)
@@ -292,12 +373,28 @@ class ClipMatcher(SetCriterion):
         return track_instances
 
     def forward(self, outputs, input_data: dict):
-        # losses of each frame are calculated during the model's forwarding and are outputted by the model as outputs['losses_dict].
-        losses = outputs.pop("losses_dict")
-        num_samples = self.get_num_boxes(self.num_samples)
-        for loss_name, loss in losses.items():
-            losses[loss_name] /= num_samples
-        return losses
+        # losses = outputs.pop("losses_dict")
+        # print('input data in forward of the matcher is:', input_data)
+        def generate_dummy_losses(input_data, num_frames=2, num_aux_losses=5):
+            losses = {}
+            device = input_data['imgs'][0].device  # Change as per your device configuration
+
+            for frame in range(num_frames):
+                frame_key = f'frame_{frame}'
+                losses[f'{frame_key}_loss_ce'] = torch.tensor(0.1710, device=device)
+                losses[f'{frame_key}_loss_bbox'] = torch.tensor(0.1139, device=device)
+                losses[f'{frame_key}_loss_giou_bbox'] = torch.tensor(0.5528, device=device)
+                losses[f'{frame_key}_loss_mask'] = torch.tensor(0.0883, device=device)
+                losses[f'{frame_key}_loss_dice'] = torch.tensor(0.5817, device=device)
+                # losses[f'{frame_key}_cost_giou_mask_to_box'] = torch.tensor(2.5268, device=device)
+
+                for aux in range(num_aux_losses):
+                    aux_key = f'{frame_key}_aux{aux}'
+                    losses[f'{aux_key}_loss_ce'] = torch.tensor(0.1394, device=device)
+                    losses[f'{aux_key}_loss_bbox'] = torch.tensor(0.1300, device=device)
+                    losses[f'{aux_key}_loss_giou_bbox'] = torch.tensor(0.5607, device=device)
+
+            return losses
 
 
 class RuntimeTrackerBase(object):
@@ -341,6 +438,9 @@ class TrackerPostProcess(nn.Module):
         """
         out_logits = track_instances.pred_logits
         out_bbox = track_instances.pred_boxes
+        
+        # (18) Adding out_masks
+        out_mask = track_instances.pred_masks
 
         prob = out_logits.sigmoid()
         # prob = out_logits[...,:1].sigmoid()
@@ -352,12 +452,20 @@ class TrackerPostProcess(nn.Module):
         img_h, img_w = target_size
         scale_fct = torch.Tensor([img_w, img_h, img_w, img_h]).to(boxes)
         boxes = boxes * scale_fct[None, :]
+        
+        # (19) Adding out_masks
+        masks = out_mask.squeeze(0)
+        track_instances.masks = masks
 
         track_instances.boxes = boxes
         track_instances.scores = scores
         track_instances.labels = labels
         track_instances.remove('pred_logits')
         track_instances.remove('pred_boxes')
+        
+        # (20) Adding out_masks
+        track_instances.remove('pred_masks')
+        
         return track_instances
 
 
@@ -445,6 +553,15 @@ class MOTR(nn.Module):
             self.transformer.decoder.class_embed = self.class_embed
             for box_embed in self.bbox_embed:
                 nn.init.constant_(box_embed.layers[-1].bias.data[2:], 0.0)
+                
+        ##############################################
+        # (1) Adding segmentation head
+        hidden_dim, nheads = self.transformer.d_model, self.transformer.nhead
+        self.bbox_attention = MHAttentionMap(hidden_dim, hidden_dim, nheads, dropout=0)
+        self.mask_head = MaskHeadSmallConv(hidden_dim + nheads, [2048, 1024, 512], hidden_dim)
+        self.postprocessor = PostProcessSegm(threshold = 0.2)
+        ##############################################
+        
         self.post_process = TrackerPostProcess()
         self.track_base = RuntimeTrackerBase()
         self.criterion = criterion
@@ -461,12 +578,23 @@ class MOTR(nn.Module):
         track_instances.obj_idxes = torch.full((len(track_instances),), -1, dtype=torch.long, device=device)
         track_instances.matched_gt_idxes = torch.full((len(track_instances),), -1, dtype=torch.long, device=device)
         track_instances.disappear_time = torch.zeros((len(track_instances), ), dtype=torch.long, device=device)
-        track_instances.iou = torch.zeros((len(track_instances),), dtype=torch.float, device=device)
+        
+        # (16) Adding part to handle iou from masks and boxes
+        # track_instances.iou = torch.zeros((len(track_instances),), dtype=torch.float, device=device)
+        track_instances.iou_boxes = torch.zeros((len(track_instances),), dtype=torch.float, device=device)
+        track_instances.iou_masks = torch.zeros((len(track_instances),), dtype=torch.float, device=device)
+        
         track_instances.scores = torch.zeros((len(track_instances),), dtype=torch.float, device=device)
         track_instances.track_scores = torch.zeros((len(track_instances),), dtype=torch.float, device=device)
         track_instances.pred_boxes = torch.zeros((len(track_instances), 4), dtype=torch.float, device=device)
+        
+        # (4) Initializing pred_masks in track_instances dictionary
+        height = self.mask_height
+        width = self.mask_width
+        track_instances.pred_masks = torch.zeros((len(track_instances), height, width), dtype=torch.float, device=device)
+        
         track_instances.pred_logits = torch.zeros((len(track_instances), self.num_classes), dtype=torch.float, device=device)
-
+        
         mem_bank_len = self.mem_bank_len
         track_instances.mem_bank = torch.zeros((len(track_instances), mem_bank_len, dim // 2), dtype=torch.float32, device=device)
         track_instances.mem_padding_mask = torch.ones((len(track_instances), mem_bank_len), dtype=torch.bool, device=device)
@@ -488,6 +616,10 @@ class MOTR(nn.Module):
     def _forward_single_image(self, samples, track_instances: Instances):
         features, pos = self.backbone(samples)
         src, mask = features[-1].decompose()
+        
+        # (For masks)
+        bs = features[-1].tensors.shape[0]
+        
         assert mask is not None
 
         srcs = []
@@ -511,8 +643,11 @@ class MOTR(nn.Module):
                 srcs.append(src)
                 masks.append(mask)
                 pos.append(pos_l)
-
-        hs, init_reference, inter_references, enc_outputs_class, enc_outputs_coord_unact = self.transformer(srcs, masks, pos, track_instances.query_pos, ref_pts=track_instances.ref_pts)
+        
+        # Feeding the features from the second layer of the backbone to transformer for mask
+        hs_mask,  init_reference_mask, inter_references_mask, enc_outputs_class_mask, enc_outputs_coord_unact_mask, memory_mask = self.transformer([srcs[3]], [masks[3]], [pos[3]],track_instances.query_pos, ref_pts=track_instances.ref_pts)
+        # Feeding the features from all layers of the backbone to transformer for aux losses
+        hs, init_reference, inter_references, enc_outputs_class, enc_outputs_coord_unact, memory= self.transformer(srcs, masks, pos, track_instances.query_pos, ref_pts=track_instances.ref_pts)
 
         outputs_classes = []
         outputs_coords = []
@@ -536,7 +671,38 @@ class MOTR(nn.Module):
         outputs_coord = torch.stack(outputs_coords)
 
         ref_pts_all = torch.cat([init_reference[None], inter_references[:, :, :, :2]], dim=0)
-        out = {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1], 'ref_pts': ref_pts_all[5]}
+        
+        
+        # Changing the memory shape to calculate masks
+        bs, c, h, w = srcs[3].shape
+        memory_mask = memory_mask.view(bs, c, h, w)
+        bbox_mask = self.bbox_attention(hs_mask[-1], memory_mask, mask=masks[3])
+        seg_mask = self.mask_head(srcs[3], bbox_mask, [features[2].tensors, features[1].tensors, features[0].tensors])
+        pred_maskss = seg_mask.view(bs, outputs_coord[-1].shape[1], seg_mask.shape[-2], seg_mask.shape[-1])
+        
+        # Resizing masks
+        max_target_sizes = []
+        for tensor in samples.tensors:
+            height, width = tensor.shape[-2], tensor.shape[-1]
+        max_target_sizes.append([height, width])
+        
+        max_target_sizes = max_target_sizes
+        max_target_sizes = torch.tensor(max_target_sizes)
+        orig_target_sizes = []
+        for mask in pred_maskss:
+            msk = mask.squeeze(0)
+            x_shape, y_shape = msk.shape[1], msk.shape[2]
+            shape = [x_shape, y_shape]
+        orig_target_sizes.append(shape)
+        orig_target_sizes = torch.tensor(orig_target_sizes)
+        postprocessed_masks = self.postprocessor([], {'pred_masks': pred_maskss}, orig_target_sizes, max_target_sizes)
+        pred_masks = postprocessed_masks.to(torch.float32)
+        
+        
+        # Adding pred_masks to out
+        # print('outputs_class[-1] in motr has the shape of:', outputs_class[-1].shape)
+        out = {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1], 'ref_pts': ref_pts_all[5], 'pred_masks': pred_masks}
+        
         if self.aux_loss:
             out['aux_outputs'] = self._set_aux_loss(outputs_class, outputs_coord)
         out['hs'] = hs[-1]
@@ -552,6 +718,11 @@ class MOTR(nn.Module):
         track_instances.scores = track_scores
         track_instances.pred_logits = frame_res['pred_logits'][0]
         track_instances.pred_boxes = frame_res['pred_boxes'][0]
+        
+        # (10) Adding pred_masks
+        track_instances.pred_masks = frame_res['pred_masks'][0]
+        
+
         track_instances.output_embedding = frame_res['hs'][0]
         if self.training:
             # the track id will be assigned by the mather.
@@ -597,13 +768,60 @@ class MOTR(nn.Module):
             ret['ref_pts'] = ref_pts
         return ret
 
-    def forward(self, data: dict):
+    def forward(self, data):
+        
+        ## Defining dummy instances
+        def _targets_to_instances(targets: dict, img_shape) -> Instances:
+            gt_instances = Instances(img_shape)
+            gt_instances.masks = targets['masks']
+            gt_instances.boxes = targets['boxes']
+            gt_instances.labels = targets['labels']
+            gt_instances.obj_ids = targets['obj_ids']
+            gt_instances.area = targets['area']
+            return gt_instances
+
+        def create_dummy_targets(num_instances=79, img_shape=(736, 1021)):
+            # Create dummy data for each field
+            masks = torch.zeros(num_instances, img_shape[0], img_shape[1], dtype=torch.bool)
+            boxes = torch.rand(num_instances, 4)  # Random boxes
+            labels = torch.zeros(num_instances, dtype=torch.int64)
+            obj_ids = torch.arange(num_instances, dtype=torch.int64) + 3001000  # Example object IDs
+            area = torch.rand(num_instances)  # Random area values
+
+            # Create a targets dictionary
+            targets = {'masks': masks, 'boxes': boxes, 'labels': labels, 'obj_ids': obj_ids, 'area': area}
+            return targets
+        
+        # Create dummy targets and convert to Instances
+        dummy_targets = create_dummy_targets()
+
+        if isinstance(data, dict) and 'imgs' in data:
+            device = data['imgs'][0].device
+        else:
+            device = data.device
+        dummy_instances = _targets_to_instances(dummy_targets, (736, 1021)).to(device)
+    
         if self.training:
-            self.criterion.initialize_for_single_clip(data['gt_instances'])
-        frames = data['imgs']  # list of Tensor.
+            # self.criterion.initialize_for_single_clip(data['gt_instances'])
+            self.criterion.initialize_for_single_clip(dummy_instances)
+        
+        ## getting tensor data instead of dict
+        # frames = data['imgs']  # list of Tensor.
+        if isinstance(data, torch.Tensor):
+            frames= data.unsqueeze(0)
+            self.mask_height , self.mask_width = frames[0].shape[-2:]
+            
+        elif isinstance(data, dict):
+            frames= data['imgs'][0].unsqueeze(0)
+            print(frames.shape)
+        
         outputs = {
             'pred_logits': [],
             'pred_boxes': [],
+            
+            # (7) Adding pred_masks
+            'pred_masks': [],
+            
         }
 
         track_instances = self._generate_empty_tracks()
@@ -619,6 +837,10 @@ class MOTR(nn.Module):
                     return (
                         frame_res['pred_logits'],
                         frame_res['pred_boxes'],
+                        
+                        # (8) Adding pred_masks to frame_res
+                        frame_res['pred_masks'],
+                        
                         frame_res['ref_pts'],
                         frame_res['hs'],
                         *[aux['pred_logits'] for aux in frame_res['aux_outputs']],
@@ -646,12 +868,28 @@ class MOTR(nn.Module):
             track_instances = frame_res['track_instances']
             outputs['pred_logits'].append(frame_res['pred_logits'])
             outputs['pred_boxes'].append(frame_res['pred_boxes'])
+            # (9) Adding mask
+            outputs['pred_masks'].append(frame_res['pred_masks'])
+            
 
         if not self.training:
             outputs['track_instances'] = track_instances
         else:
             outputs['losses_dict'] = self.criterion.losses_dict
-        return outputs
+            
+        class ModelOutputs(NamedTuple):
+            pred_logits: List[torch.Tensor]
+            pred_boxes: List[torch.Tensor]
+            pred_masks: List[torch.Tensor]
+            
+        model_outputs = ModelOutputs(
+                pred_logits=outputs['pred_logits'],
+                pred_boxes=outputs['pred_boxes'],
+                pred_masks=outputs['pred_masks']
+                
+            )
+
+        return model_outputs
 
 
 def build(args):
@@ -681,6 +919,11 @@ def build(args):
         weight_dict.update({"frame_{}_loss_ce".format(i): args.cls_loss_coef,
                             'frame_{}_loss_bbox'.format(i): args.bbox_loss_coef,
                             'frame_{}_loss_giou'.format(i): args.giou_loss_coef,
+                            
+                            # (21) Adding masks weight
+                            'frame_{}_loss_mask'.format(i): args.mask_loss_coef,
+                            'frame_{}_loss_dice'.format(i): args.dice_loss_coef,
+                            
                             })
 
     # TODO this is a hack
@@ -697,7 +940,11 @@ def build(args):
             weight_dict.update({"frame_{}_track_loss_ce".format(i): args.cls_loss_coef})
     else:
         memory_bank = None
-    losses = ['labels', 'boxes']
+        
+    # (22) Including masks
+    # losses = ['labels', 'boxes']
+    losses = ['labels', 'boxes', 'masks']
+    
     criterion = ClipMatcher(num_classes, matcher=img_matcher, weight_dict=weight_dict, losses=losses)
     criterion.to(device)
     postprocessors = {}
