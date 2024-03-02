@@ -1,21 +1,25 @@
-'''
-1. dataset/joint.py
-Editing joint.py Adding masks to the target instances Modifying data augmentation
+# Project Updates Documentation
 
-2. dataset/transforms.py
-Modifying mask parts
+This document outlines the recent enhancements and modifications to the codebase, structured by files and specific functionalities. Each point details the nature of the changes and their impact on the corresponding modules.
 
-3. main.py
-Adding AppleMOTS data path
+## Dataset Modification
+- `joint.py`: Adding masks to the target instances Modifying data augmentation
+- `transforms.py`: Modifying mask parts
 
-4. motr.py
-4.1. Modifying MOTR class forward function to receive tensor data instead of dict
-4.2. Creating dummy instance to contain the gt_instances inside the MOTR class forward function
-4.3. Modifying ClipMatcher class forward function to receive only gt_data from the MOTR class forward function by creating dummy losses dict inside it
-4.4. Modifying the MOTR class forward function to output dictionary of predictions instead of dictionary of two dictionaries of losses and predictions
+## MOTR Model Modifications
+- `motr.py`:
+1. Modifying MOTR class forward function to receive tensor data instead of dict
+2. Creating dummy instance to contain the gt_instances inside the MOTR class forward function
+3. Modifying ClipMatcher class forward function to receive only gt_data from the MOTR class forward function by creating dummy losses dict inside it
+4. Modifying the MOTR class forward function to output dictionary of predictions instead of dictionary of two dictionaries of losses and predictions
 
+## Main Modifications
+- `main.py`:
+1. Adding AppleMOTS data path
+2. Adding the add_graph to map model to tensorboard
 
-5. main.py
-Adding the add_graph to map model to tensorboard
+## Execution Command
+```bash 
+configs/ sbatch --j model_graph_without_mask one_node_graph_without_mask.sh
 
-'''
+```
