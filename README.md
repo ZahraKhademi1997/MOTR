@@ -3,6 +3,9 @@
 This document outlines the recent enhancements and modifications to the codebase, structured by files and specific functionalities. Each point details the nature of the changes and their impact on the corresponding modules.
 
 ## Dataset Modification
+- `gt_generation.py`: Generating gt.txt file from the mask images (Challenge: each object ids are extracted from the mask's pixel values, but there are some discrepancy in the pixel values within each frame which needs to be remapped to maintain continuous object ids)
+- `prepare.py`: Adding function to create path files for Applemots
+- `gen_labels_applemots.py`: To generate distinct label ext file for each frame and visualizing mask, bboxes and objesct ids on images
 - `joint.py`: Adding masks to the target instances Modifying data augmentation
 - `transforms.py`: Modifying mask parts
 
@@ -12,7 +15,7 @@ This document outlines the recent enhancements and modifications to the codebase
 ## MOTR Model Modifications
 - `motr.py`:
 1. Adding the segmentation head only in MOTR class
-2. Adding segmentation postprocessing head in MORR class
+2. Adding segmentation postprocessing head in MOTR class
 3. Adding loss_masks to the ClipMatcher class and in get_loss function
 4. Predicting masks in _forward_single_image function in MOTR class and adding it to frame_res
 5. Adding mask to track instances in multiple functions including:
