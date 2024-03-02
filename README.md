@@ -8,3 +8,8 @@ Modifying mask parts
 3. main.py
 Adding AppleMOTS data path
 '''
+
+'''
+4. deformable_transformer_plus.py
+Outputing the feature map from the transformer encoder (memoey)
+'''

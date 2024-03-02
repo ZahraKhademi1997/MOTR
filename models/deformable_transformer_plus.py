@@ -194,7 +194,7 @@ class DeformableTransformer(nn.Module):
         inter_references_out = inter_references
         if self.two_stage:
             return hs, init_reference_out, inter_references_out, enc_outputs_class, enc_outputs_coord_unact
-        return hs, init_reference_out, inter_references_out, None, None
+        return hs, init_reference_out, inter_references_out, None, None, memory
 
 
 class DeformableTransformerEncoderLayer(nn.Module):
