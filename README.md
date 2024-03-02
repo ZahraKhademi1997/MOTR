@@ -2,7 +2,7 @@
 
 This document outlines the recent enhancements and modifications to the codebase, structured by files and specific functionalities. Each point details the nature of the changes and their impact on the corresponding modules.
 
-## Dataset MOdification
+## Dataset Modification
 - `joint.py`: Adding masks to the target instances Modifying data augmentation
 - `transforms.py`: Modifying mask parts
 
