@@ -51,7 +51,7 @@ class DETRsegm(nn.Module):
 
         src, mask = features[-1].decompose()
         src_proj = self.detr.input_proj(src)
-        hs, memory = self.detr.transformer(src_proj, mask, self.detr.query_embed.weight, pos[-1])
+        hs, memory = self.detr.transformer(src_proj, mask, self.detr.query_embed.weight, pos[-1]) # query and key
 
         outputs_class = self.detr.class_embed(hs)
         outputs_coord = self.detr.bbox_embed(hs).sigmoid()
