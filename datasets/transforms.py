@@ -9,611 +9,281 @@
 # ------------------------------------------------------------------------
 
 """
-Transforms and data augmentation for both image + bbox.
+MOT dataset which returns image_id for evaluation.
 """
-import copy
-import random
-import PIL
-import torch
-import torchvision.transforms as T
-import torchvision.transforms.functional as F
-from PIL import Image, ImageDraw
-from util.box_ops import box_xyxy_to_cxcywh
-from util.misc import interpolate
+from pathlib import Path
+import cv2
 import numpy as np
-import os 
+import torch
+import torch.utils.data
+import os.path as osp
+from PIL import Image, ImageDraw
+import copy
+import datasets.transforms as T
+from models.structures import Instances
 
 
+class DetMOTDetection:
+    def __init__(self, args, data_txt_path: str, seqs_folder, dataset2transform):
+        self.args = args
+        self.dataset2transform = dataset2transform
+        self.num_frames_per_batch = max(args.sampler_lengths)
+        self.sample_mode = args.sample_mode
+        self.sample_interval = args.sample_interval
+        self.vis = args.vis
+        self.video_dict = {}
 
-def crop_mot(image, target, region):
-    cropped_image = F.crop(image, *region)
+        with open(data_txt_path, 'r') as file:
+            self.img_files = file.readlines()
+            self.img_files = [osp.join(seqs_folder, x.strip()) for x in self.img_files]
+            self.img_files = list(filter(lambda x: len(x) > 0, self.img_files))
 
-    target = target.copy()
-    i, j, h, w = region
+        self.label_files = [(x.replace('images', 'labels_with_ids').replace('.png', '.txt').replace('.jpg', '.txt'))
+                            for x in self.img_files]
+        # The number of images per sample: 1 + (num_frames - 1) * interval.
+        # The number of valid samples: num_images - num_image_per_sample + 1.
+        self.item_num = len(self.img_files) - (self.num_frames_per_batch - 1) * self.sample_interval
 
-    # should we do something wrt the original size?
-    target["size"] = torch.tensor([h, w])
+        self._register_videos()
 
-    fields = ["labels", "area", "iscrowd", "obj_ids"]
+        # video sampler.
+        self.sampler_steps: list = args.sampler_steps
+        self.lengths: list = args.sampler_lengths
+        print("sampler_steps={} lenghts={}".format(self.sampler_steps, self.lengths))
+        if self.sampler_steps is not None and len(self.sampler_steps) > 0:
+            # Enable sampling length adjustment.
+            assert len(self.lengths) > 0
+            assert len(self.lengths) == len(self.sampler_steps) + 1
+            for i in range(len(self.sampler_steps) - 1):
+                assert self.sampler_steps[i] < self.sampler_steps[i + 1]
+            self.item_num = len(self.img_files) - (self.lengths[-1] - 1) * self.sample_interval
+            self.period_idx = 0
+            self.num_frames_per_batch = self.lengths[0]
+            self.current_epoch = 0
 
-    if "boxes" in target:
-        boxes = target["boxes"]
-        cropped_boxes = boxes - torch.as_tensor([j, i, j, i])
-        target["boxes"] = cropped_boxes.reshape(-1, 4)
-        fields.append("boxes")
+    def _register_videos(self):
+        for label_name in self.label_files:
+            video_name = '/'.join(label_name.split('/')[:-1])
+            if video_name not in self.video_dict:
+                print("register {}-th video: {} ".format(len(self.video_dict) + 1, video_name))
+                self.video_dict[video_name] = len(self.video_dict)
+                # assert len(self.video_dict) <= 300
 
-    if "masks" in target:
-        # FIXME should we update the area here if there are no boxes?
-        target['masks'] = target['masks'][:, i:i + h, j:j + w]
-        fields.append("masks")
+    def set_epoch(self, epoch):
+        self.current_epoch = epoch
+        if self.sampler_steps is None or len(self.sampler_steps) == 0:
+            # fixed sampling length.
+            return
 
-    # remove elements for which the boxes or masks that have zero area
-    if "boxes" in target or "masks" in target:
-        # favor boxes selection when defining which elements to keep
-        # this is compatible with previous implementation
-        if "boxes" in target:
-            cropped_boxes = target['boxes'].reshape(-1, 2, 2)
-            max_size = torch.as_tensor([w, h], dtype=torch.float32)
-            cropped_boxes = torch.min(cropped_boxes.reshape(-1, 2, 2), max_size)
-            cropped_boxes = cropped_boxes.clamp(min=0)
-            keep = torch.all(cropped_boxes[:, 1, :] > cropped_boxes[:, 0, :], dim=1)
+        for i in range(len(self.sampler_steps)):
+            if epoch >= self.sampler_steps[i]:
+                self.period_idx = i + 1
+        print("set epoch: epoch {} period_idx={}".format(epoch, self.period_idx))
+        self.num_frames_per_batch = self.lengths[self.period_idx]
+
+    def step_epoch(self):
+        # one epoch finishes.
+        print("Dataset: epoch {} finishes".format(self.current_epoch))
+        self.set_epoch(self.current_epoch + 1)
+
+    @staticmethod
+    def _targets_to_instances(targets: dict, img_shape) -> Instances:
+        gt_instances = Instances(tuple(img_shape))
+        gt_instances.boxes = targets['boxes']
+        gt_instances.labels = targets['labels']
+        gt_instances.obj_ids = targets['obj_ids']
+        gt_instances.area = targets['area']
+        return gt_instances
+
+    def _pre_single_frame(self, idx: int):
+        img_path = self.img_files[idx]
+        label_path = self.label_files[idx]
+        if 'crowdhuman' in img_path:
+            img_path = img_path.replace('.jpg', '.png')
+        img = Image.open(img_path)
+        targets = {}
+        w, h = img._size
+        assert w > 0 and h > 0, "invalid image {} with shape {} {}".format(img_path, w, h)
+        if osp.isfile(label_path):
+            labels0 = np.loadtxt(label_path, dtype=np.float32).reshape(-1, 6)
+
+            # normalized cewh to pixel xyxy format
+            labels = labels0.copy()
+            labels[:, 2] = w * (labels0[:, 2] - labels0[:, 4] / 2)
+            labels[:, 3] = h * (labels0[:, 3] - labels0[:, 5] / 2)
+            labels[:, 4] = w * (labels0[:, 2] + labels0[:, 4] / 2)
+            labels[:, 5] = h * (labels0[:, 3] + labels0[:, 5] / 2)
         else:
-            keep = target['masks'].flatten(1).any(1)
-
-        for field in fields:
-            target[field] = target[field][keep]
-
-    return cropped_image, target
-
-
-def random_shift(image, target, region, sizes):
-    oh, ow = sizes
-    # step 1, shift crop and re-scale image firstly
-    cropped_image = F.crop(image, *region)
-    cropped_image = F.resize(cropped_image, sizes)
-
-    target = target.copy()
-    i, j, h, w = region
-
-    # should we do something wrt the original size?
-    target["size"] = torch.tensor([h, w])
-
-    fields = ["labels", "area", "iscrowd", "obj_ids"]
-
-    if "boxes" in target:
-        boxes = target["boxes"]
-        cropped_boxes = boxes - torch.as_tensor([j, i, j, i])
-        cropped_boxes *= torch.as_tensor([ow / w, oh / h, ow / w, oh / h])
-        target["boxes"] = cropped_boxes.reshape(-1, 4)
-        fields.append("boxes")
-
-    if "masks" in target:
-        # FIXME should we update the area here if there are no boxes?
-        target['masks'] = target['masks'][:, i:i + h, j:j + w]
-        fields.append("masks")
-
-    # remove elements for which the boxes or masks that have zero area
-    if "boxes" in target or "masks" in target:
-        # favor boxes selection when defining which elements to keep
-        # this is compatible with previous implementation
-        if "boxes" in target:
-            cropped_boxes = target['boxes'].reshape(-1, 2, 2)
-            max_size = torch.as_tensor([w, h], dtype=torch.float32)
-            cropped_boxes = torch.min(cropped_boxes.reshape(-1, 2, 2), max_size)
-            cropped_boxes = cropped_boxes.clamp(min=0)
-            keep = torch.all(cropped_boxes[:, 1, :] > cropped_boxes[:, 0, :], dim=1)
+            raise ValueError('invalid label path: {}'.format(label_path))
+        video_name = '/'.join(label_path.split('/')[:-1])
+        obj_idx_offset = self.video_dict[video_name] * 1000000  # 1000000 unique ids is enough for a video.
+        if 'crowdhuman' in img_path:
+            targets['dataset'] = 'CrowdHuman'
+        elif 'MOT17' in img_path:
+            targets['dataset'] = 'MOT17'
         else:
-            keep = target['masks'].flatten(1).any(1)
-
-        for field in fields:
-            target[field] = target[field][keep]
-
-    return cropped_image, target
-
-
-def crop(image, target, region):
-    cropped_image = F.crop(image, *region)
-
-    target = target.copy()
-    i, j, h, w = region
-
-    # should we do something wrt the original size?
-    target["size"] = torch.tensor([h, w])
-
-    fields = ["labels", "area", "iscrowd"]
-    if 'obj_ids' in target:
-        fields.append('obj_ids')
-
-    if "boxes" in target:
-        boxes = target["boxes"]
-        max_size = torch.as_tensor([w, h], dtype=torch.float32)
-        cropped_boxes = boxes - torch.as_tensor([j, i, j, i])
-        cropped_boxes = torch.min(cropped_boxes.reshape(-1, 2, 2), max_size)
-        cropped_boxes = cropped_boxes.clamp(min=0)
-
-        area = (cropped_boxes[:, 1, :] - cropped_boxes[:, 0, :]).prod(dim=1)
-        target["boxes"] = cropped_boxes.reshape(-1, 4)
-        target["area"] = area
-        fields.append("boxes")
-
-    if "masks" in target:
-        ##################################################################################
-        # (2)
-        if target["masks"].shape[0] != 0:
-            # FIXME should we update the area here if there are no boxes?
-            # print('target["masks"] in transforms.py is:', target["masks"].shape)
-            target['masks'] = target['masks'][:, i:i + h, j:j + w]
-            fields.append("masks")
-        ##################################################################################
-
-    # remove elements for which the boxes or masks that have zero area
-    if "boxes" in target or "masks" in target:
-        # favor boxes selection when defining which elements to keep
-        # this is compatible with previous implementation
-        if "boxes" in target:
-            cropped_boxes = target['boxes'].reshape(-1, 2, 2)
-            keep = torch.all(cropped_boxes[:, 1, :] > cropped_boxes[:, 0, :], dim=1)
-        else:
-            keep = target['masks'].flatten(1).any(1)
-
-        for field in fields:
-            target[field] = target[field][keep]
-
-    return cropped_image, target
-
-
-def hflip(image, target):
-    flipped_image = F.hflip(image)
-
-    w, h = image.size
-
-    target = target.copy()
-    if "boxes" in target:
-        boxes = target["boxes"]
-        boxes = boxes[:, [2, 1, 0, 3]] * torch.as_tensor([-1, 1, -1, 1]) + torch.as_tensor([w, 0, w, 0])
-        target["boxes"] = boxes
-
-    if "masks" in target:
-        target['masks'] = target['masks'].flip(-1)
-
-    return flipped_image, target
-
-
-def resize(image, target, size, max_size=None):
-    # size can be min_size (scalar) or (w, h) tuple
-
-    def get_size_with_aspect_ratio(image_size, size, max_size=None):
-        w, h = image_size
-        if max_size is not None:
-            min_original_size = float(min((w, h)))
-            max_original_size = float(max((w, h)))
-            if max_original_size / min_original_size * size > max_size:
-                size = int(round(max_size * min_original_size / max_original_size))
-
-        if (w <= h and w == size) or (h <= w and h == size):
-            return (h, w)
-
-        if w < h:
-            ow = size
-            oh = int(size * h / w)
-        else:
-            oh = size
-            ow = int(size * w / h)
-
-        return (oh, ow)
-
-    def get_size(image_size, size, max_size=None):
-        if isinstance(size, (list, tuple)):
-            return size[::-1]
-        else:
-            return get_size_with_aspect_ratio(image_size, size, max_size)
-
-    size = get_size(image.size, size, max_size)
-    rescaled_image = F.resize(image, size)
-
-    if target is None:
-        return rescaled_image, None
-
-    ratios = tuple(float(s) / float(s_orig) for s, s_orig in zip(rescaled_image.size, image.size))
-    ratio_width, ratio_height = ratios
-
-    target = target.copy()
-    if "boxes" in target:
-        boxes = target["boxes"]
-        scaled_boxes = boxes * torch.as_tensor([ratio_width, ratio_height, ratio_width, ratio_height])
-        target["boxes"] = scaled_boxes
-
-    if "area" in target:
-        area = target["area"]
-        scaled_area = area * (ratio_width * ratio_height)
-        target["area"] = scaled_area
-
-    h, w = size
-    target["size"] = torch.tensor([h, w])
-
-    ################################################################################################################
-    # (2)
-    # if "masks" in target:
-    #     target['masks'] = interpolate(
-    #         target['masks'][:, None].float(), size, mode="nearest")[:, 0] > 0.5
-    if "masks" in target:
-        # print('target[masks][:, None] in transform has the shape of:', target['masks'][:, None].shape) # torch.Size([5, 1, 480, 640])
-        masks = target["masks"]
-        non_empty_masks = []
-        for i in range(masks.shape[0]):
-            mask = masks[i]
-            if not torch.all(mask == 0):
-                non_empty_masks.append(mask)
-            else:
-                continue
-        if non_empty_masks:
-            masks = torch.stack(non_empty_masks, dim = 0)
-            interpolated_mask = interpolate(masks[None].float(), size, mode="nearest")[0] > 0.5
-        if non_empty_masks:
-            target["masks"] = interpolated_mask
-            # print('target[masks] while isnt empty has the shape of:', target["masks"].shape)
-        # else:
-        #     # If all masks were empty, remove the "masks" key from the target
-        #     target["masks"] = torch.empty((2, size[0], size[1]), dtype=torch.uint8)
-        #     print('target[masks] while is empty has the shape of:', target["masks"].shape)
-    ################################################################################################################
-
-    return rescaled_image, target
-
-
-def pad(image, target, padding):
-    # assumes that we only pad on the bottom right corners
-    padded_image = F.pad(image, (0, 0, padding[0], padding[1]))
-    if target is None:
-        return padded_image, None
-    target = target.copy()
-    # should we do something wrt the original size?
-    target["size"] = torch.tensor(padded_image[::-1])
-    if "masks" in target:
-        target['masks'] = torch.nn.functional.pad(target['masks'], (0, padding[0], 0, padding[1]))
-    return padded_image, target
-
-
-class RandomCrop(object):
-    def __init__(self, size):
-        self.size = size
-
-    def __call__(self, img, target):
-        region = T.RandomCrop.get_params(img, self.size)
-        return crop(img, target, region)
-
-
-class MotRandomCrop(RandomCrop):
-    def __call__(self, imgs: list, targets: list):
-        ret_imgs = []
-        ret_targets = []
-        region = T.RandomCrop.get_params(imgs[0], self.size)
-        for img_i, targets_i in zip(imgs, targets):
-            img_i, targets_i = crop(img_i, targets_i, region)
-            ret_imgs.append(img_i)
-            ret_targets.append(targets_i)
-        return ret_imgs, ret_targets
-
-class FixedMotRandomCrop(object):
-    def __init__(self, min_size: int, max_size: int):
-        self.min_size = min_size
-        self.max_size = max_size
-
-    def __call__(self, imgs: list, targets: list):
-        ret_imgs = []
-        ret_targets = []
-        w = random.randint(self.min_size, min(imgs[0].width, self.max_size))
-        h = random.randint(self.min_size, min(imgs[0].height, self.max_size))
-        region = T.RandomCrop.get_params(imgs[0], [h, w])
-        for img_i, targets_i in zip(imgs, targets):
-            img_i, targets_i = crop_mot(img_i, targets_i, region)
-            ret_imgs.append(img_i)
-            ret_targets.append(targets_i)
-        return ret_imgs, ret_targets
-
-class MotRandomShift(object):
-    def __init__(self, bs=1):
-        self.bs = bs
-
-    def __call__(self, imgs: list, targets: list):
-        ret_imgs = copy.deepcopy(imgs)
-        ret_targets = copy.deepcopy(targets)
-
-        n_frames = len(imgs)
-        select_i = random.choice(list(range(n_frames)))
-        w, h = imgs[select_i].size
-
-        xshift = (100 * torch.rand(self.bs)).int()
-        xshift *= (torch.randn(self.bs) > 0.0).int() * 2 - 1 
-        yshift = (100 * torch.rand(self.bs)).int()
-        yshift *= (torch.randn(self.bs) > 0.0).int() * 2 - 1
-        ymin = max(0, -yshift[0])
-        ymax = min(h, h - yshift[0])
-        xmin = max(0, -xshift[0])
-        xmax = min(w, w - xshift[0])
-
-        region = (int(ymin), int(xmin), int(ymax-ymin), int(xmax-xmin))
-        ret_imgs[select_i], ret_targets[select_i] = random_shift(imgs[select_i], targets[select_i], region, (h,w)) 
-        
-        return ret_imgs, ret_targets
-
-
-class FixedMotRandomShift(object):
-    def __init__(self, bs=1, padding=50):
-        self.bs = bs
-        self.padding = padding
-
-    def __call__(self, imgs: list, targets: list):
-        ret_imgs = []
-        ret_targets = []
-
-        n_frames = len(imgs)
-        w, h = imgs[0].size
-        xshift = (self.padding * torch.rand(self.bs)).int() + 1
-        xshift *= (torch.randn(self.bs) > 0.0).int() * 2 - 1
-        yshift = (self.padding * torch.rand(self.bs)).int() + 1
-        yshift *= (torch.randn(self.bs) > 0.0).int() * 2 - 1
-        ret_imgs.append(imgs[0])
-        ret_targets.append(targets[0])
-        for i in range(1, n_frames):
-            ymin = max(0, -yshift[0])
-            ymax = min(h, h - yshift[0])
-            xmin = max(0, -xshift[0])
-            xmax = min(w, w - xshift[0])
-            prev_img = ret_imgs[i-1].copy()
-            prev_target = copy.deepcopy(ret_targets[i-1])
-            region = (int(ymin), int(xmin), int(ymax - ymin), int(xmax - xmin))
-            img_i, target_i = random_shift(prev_img, prev_target, region, (h, w))
-            ret_imgs.append(img_i)
-            ret_targets.append(target_i)
-
-        return ret_imgs, ret_targets
-
-
-class RandomSizeCrop(object):
-    def __init__(self, min_size: int, max_size: int):
-        self.min_size = min_size
-        self.max_size = max_size
-
-    def __call__(self, img: PIL.Image.Image, target: dict):
-        w = random.randint(self.min_size, min(img.width, self.max_size))
-        h = random.randint(self.min_size, min(img.height, self.max_size))
-        region = T.RandomCrop.get_params(img, [h, w])
-        return crop(img, target, region)
-
-
-class MotRandomSizeCrop(RandomSizeCrop):
-    def __call__(self, imgs, targets):
-        w = random.randint(self.min_size, min(imgs[0].width, self.max_size))
-        h = random.randint(self.min_size, min(imgs[0].height, self.max_size))
-        region = T.RandomCrop.get_params(imgs[0], [h, w])
-        ret_imgs = []
-        ret_targets = []
-        for img_i, targets_i in zip(imgs, targets):
-            img_i, targets_i = crop(img_i, targets_i, region)
-            ret_imgs.append(img_i)
-            ret_targets.append(targets_i)
-        return ret_imgs, ret_targets
-
-
-class CenterCrop(object):
-    def __init__(self, size):
-        self.size = size
-
-    def __call__(self, img, target):
-        image_width, image_height = img.size
-        crop_height, crop_width = self.size
-        crop_top = int(round((image_height - crop_height) / 2.))
-        crop_left = int(round((image_width - crop_width) / 2.))
-        return crop(img, target, (crop_top, crop_left, crop_height, crop_width))
-
-
-class MotCenterCrop(CenterCrop):
-    def __call__(self, imgs, targets):
-        image_width, image_height = imgs[0].size
-        crop_height, crop_width = self.size
-        crop_top = int(round((image_height - crop_height) / 2.))
-        crop_left = int(round((image_width - crop_width) / 2.))
-        ret_imgs = []
-        ret_targets = []
-        for img_i, targets_i in zip(imgs, targets):
-            img_i, targets_i = crop(img_i, targets_i, (crop_top, crop_left, crop_height, crop_width))
-            ret_imgs.append(img_i)
-            ret_targets.append(targets_i)
-        return ret_imgs, ret_targets
-
-
-class RandomHorizontalFlip(object):
-    def __init__(self, p=0.5):
-        self.p = p
-
-    def __call__(self, img, target):
-        if random.random() < self.p:
-            return hflip(img, target)
-        return img, target
-
-
-class MotRandomHorizontalFlip(RandomHorizontalFlip):
-    def __call__(self, imgs, targets):
-        if random.random() < self.p:
-            ret_imgs = []
-            ret_targets = []
-            for img_i, targets_i in zip(imgs, targets):
-                img_i, targets_i = hflip(img_i, targets_i)
-                ret_imgs.append(img_i)
-                ret_targets.append(targets_i)
-            return ret_imgs, ret_targets
-        return imgs, targets
-
-
-class RandomResize(object):
-    def __init__(self, sizes, max_size=None):
-        assert isinstance(sizes, (list, tuple))
-        self.sizes = sizes
-        self.max_size = max_size
-
-    def __call__(self, img, target=None):
-        size = random.choice(self.sizes)
-        return resize(img, target, size, self.max_size)
-
-
-class MotRandomResize(RandomResize):
-    def __call__(self, imgs, targets):
-        size = random.choice(self.sizes)
-        ret_imgs = []
-        ret_targets = []
-        for img_i, targets_i in zip(imgs, targets):
-            img_i, targets_i = resize(img_i, targets_i, size, self.max_size)
-            ret_imgs.append(img_i)
-            ret_targets.append(targets_i)
-        return ret_imgs, ret_targets
-
-
-class RandomPad(object):
-    def __init__(self, max_pad):
-        self.max_pad = max_pad
-
-    def __call__(self, img, target):
-        pad_x = random.randint(0, self.max_pad)
-        pad_y = random.randint(0, self.max_pad)
-        return pad(img, target, (pad_x, pad_y))
-
-
-class MotRandomPad(RandomPad):
-    def __call__(self, imgs, targets):
-        pad_x = random.randint(0, self.max_pad)
-        pad_y = random.randint(0, self.max_pad)
-        ret_imgs = []
-        ret_targets = []
-        for img_i, targets_i in zip(imgs, targets):
-            img_i, target_i = pad(img_i, targets_i, (pad_x, pad_y))
-            ret_imgs.append(img_i)
-            ret_targets.append(targets_i)
-        return ret_imgs, ret_targets
-
-
-class RandomSelect(object):
-    """
-    Randomly selects between transforms1 and transforms2,
-    with probability p for transforms1 and (1 - p) for transforms2
-    """
-    def __init__(self, transforms1, transforms2, p=0.5):
-        self.transforms1 = transforms1
-        self.transforms2 = transforms2
-        self.p = p
-
-    def __call__(self, img, target):
-        if random.random() < self.p:
-            return self.transforms1(img, target)
-        return self.transforms2(img, target)
-
-
-class MotRandomSelect(RandomSelect):
-    """
-    Randomly selects between transforms1 and transforms2,
-    with probability p for transforms1 and (1 - p) for transforms2
-    """
-    def __call__(self, imgs, targets):
-        if random.random() < self.p:
-            return self.transforms1(imgs, targets)
-        return self.transforms2(imgs, targets)
-
-
-class ToTensor(object):
-    def __call__(self, img, target):
-        return F.to_tensor(img), target
-
-
-class MotToTensor(ToTensor):
-    def __call__(self, imgs, targets):
-        ret_imgs = []
-        for img in imgs:
-            ret_imgs.append(F.to_tensor(img))
-        return ret_imgs, targets
-
-
-class RandomErasing(object):
-
-    def __init__(self, *args, **kwargs):
-        self.eraser = T.RandomErasing(*args, **kwargs)
-
-    def __call__(self, img, target):
-        return self.eraser(img), target
-
-
-class MotRandomErasing(RandomErasing):
-    def __call__(self, imgs, targets):
-        # TODO: Rewrite this part to ensure the data augmentation is same to each image.
-        ret_imgs = []
-        for img_i, targets_i in zip(imgs, targets):
-            ret_imgs.append(self.eraser(img_i))
-        return ret_imgs, targets
-
-
-class MoTColorJitter(T.ColorJitter):
-    def __call__(self, imgs, targets):
-        transform = self.get_params(self.brightness, self.contrast,
-                                    self.saturation, self.hue)
-        ret_imgs = []
-        for img_i, targets_i in zip(imgs, targets):
-            ret_imgs.append(transform(img_i))
-        return ret_imgs, targets
-
-
-class Normalize(object):
-    def __init__(self, mean, std):
-        self.mean = mean
-        self.std = std
-
-    def __call__(self, image, target=None):
-        if target is not None:
-            target['ori_img'] = image.clone()
-        image = F.normalize(image, mean=self.mean, std=self.std)
-        if target is None:
-            return image, None
-        target = target.copy()
-        h, w = image.shape[-2:]
-        if "boxes" in target:
-            boxes = target["boxes"]
-            boxes = box_xyxy_to_cxcywh(boxes)
-            boxes = boxes / torch.tensor([w, h, w, h], dtype=torch.float32)
-            target["boxes"] = boxes
-        return image, target
-
-
-class MotNormalize(Normalize):
-    def __call__(self, imgs, targets=None):
-        ret_imgs = []
-        ret_targets = []
-        for i in range(len(imgs)):
-            img_i = imgs[i]
-            targets_i = targets[i] if targets is not None else None
-            img_i, targets_i = super().__call__(img_i, targets_i)
-            ret_imgs.append(img_i)
-            ret_targets.append(targets_i)
-        return ret_imgs, ret_targets
-
-
-class Compose(object):
-    def __init__(self, transforms):
-        self.transforms = transforms
-
-    def __call__(self, image, target):
-        for t in self.transforms:
-            image, target = t(image, target)
-        return image, target
-
-    def __repr__(self):
-        format_string = self.__class__.__name__ + "("
-        for t in self.transforms:
-            format_string += "\n"
-            format_string += "    {0}".format(t)
-        format_string += "\n)"
-        return format_string
-
-
-class MotCompose(Compose):
-    def __call__(self, imgs, targets):
-        for t in self.transforms:
-            imgs, targets = t(imgs, targets)
-        return imgs, targets
+            raise NotImplementedError()
+        targets['boxes'] = []
+        targets['area'] = []
+        targets['iscrowd'] = []
+        targets['labels'] = []
+        targets['obj_ids'] = []
+        targets['image_id'] = torch.as_tensor(idx)
+        targets['size'] = torch.as_tensor([h, w])
+        targets['orig_size'] = torch.as_tensor([h, w])
+        for label in labels:
+            targets['boxes'].append(label[2:6].tolist())
+            targets['area'].append(label[4] * label[5])
+            targets['iscrowd'].append(0)
+            targets['labels'].append(0)
+            obj_id = label[1] + obj_idx_offset if label[1] >= 0 else label[1]
+            targets['obj_ids'].append(obj_id)  # relative id
+
+        targets['area'] = torch.as_tensor(targets['area'])
+        targets['iscrowd'] = torch.as_tensor(targets['iscrowd'])
+        targets['labels'] = torch.as_tensor(targets['labels'])
+        targets['obj_ids'] = torch.as_tensor(targets['obj_ids'])
+        targets['boxes'] = torch.as_tensor(targets['boxes'], dtype=torch.float32).reshape(-1, 4)
+        return img, targets
+
+    def _get_sample_range(self, start_idx):
+
+        # take default sampling method for normal dataset.
+        assert self.sample_mode in ['fixed_interval', 'random_interval'], 'invalid sample mode: {}'.format(self.sample_mode)
+        if self.sample_mode == 'fixed_interval':
+            sample_interval = self.sample_interval
+        elif self.sample_mode == 'random_interval':
+            sample_interval = np.random.randint(1, self.sample_interval + 1)
+        default_range = start_idx, start_idx + (self.num_frames_per_batch - 1) * sample_interval + 1, sample_interval
+        return default_range
+
+    def pre_continuous_frames(self, start, end, interval=1):
+        targets = []
+        images = []
+        for i in range(start, end, interval):
+            img_i, targets_i = self._pre_single_frame(i)
+            images.append(img_i)
+            targets.append(targets_i)
+        return images, targets
+
+    def __getitem__(self, idx):
+        sample_start, sample_end, sample_interval = self._get_sample_range(idx)
+        images, targets = self.pre_continuous_frames(sample_start, sample_end, sample_interval)
+        data = {}
+        dataset_name = targets[0]['dataset']
+        transform = self.dataset2transform[dataset_name]
+        if transform is not None:
+            images, targets = transform(images, targets)
+        gt_instances = []
+        for img_i, targets_i in zip(images, targets):
+            gt_instances_i = self._targets_to_instances(targets_i, img_i.shape[1:3])
+            gt_instances.append(gt_instances_i)
+        data.update({
+            'imgs': images,
+            'gt_instances': gt_instances,
+        })
+        if self.args.vis:
+            data['ori_img'] = [target_i['ori_img'] for target_i in targets]
+        return data
+
+    def __len__(self):
+        return self.item_num
+
+
+class DetMOTDetectionValidation(DetMOTDetection):
+    def __init__(self, args, seqs_folder, dataset2transform):
+        args.data_txt_path = args.val_data_txt_path
+        super().__init__(args, seqs_folder, dataset2transform)
+
+
+
+def make_transforms_for_mot17(image_set, args=None):
+
+    normalize = T.MotCompose([
+        T.MotToTensor(),
+        T.MotNormalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+    ])
+    scales = [608, 640, 672, 704, 736, 768, 800, 832, 864, 896, 928, 960, 992]
+
+    if image_set == 'train':
+        return T.MotCompose([
+            T.MotRandomHorizontalFlip(),
+            T.MotRandomSelect(
+                T.MotRandomResize(scales, max_size=1536),
+                T.MotCompose([
+                    T.MotRandomResize([400, 500, 600]),
+                    T.FixedMotRandomCrop(384, 600),
+                    T.MotRandomResize(scales, max_size=1536),
+                ])
+            ),
+            normalize,
+        ])
+
+    if image_set == 'val':
+        return T.MotCompose([
+            T.MotRandomResize([800], max_size=1333),
+            normalize,
+        ])
+
+    raise ValueError(f'unknown {image_set}')
+
+
+def make_transforms_for_crowdhuman(image_set, args=None):
+
+    normalize = T.MotCompose([
+        T.MotToTensor(),
+        T.MotNormalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+    ])
+    scales = [608, 640, 672, 704, 736, 768, 800, 832, 864, 896, 928, 960, 992]
+
+    if image_set == 'train':
+        return T.MotCompose([
+            T.MotRandomHorizontalFlip(),
+            T.FixedMotRandomShift(bs=1),
+            T.MotRandomSelect(
+                T.MotRandomResize(scales, max_size=1536),
+                T.MotCompose([
+                    T.MotRandomResize([400, 500, 600]),
+                    T.FixedMotRandomCrop(384, 600),
+                    T.MotRandomResize(scales, max_size=1536),
+                ])
+            ),
+            normalize,
+
+        ])
+
+    if image_set == 'val':
+        return T.MotCompose([
+            T.MotRandomResize([800], max_size=1333),
+            normalize,
+        ])
+
+    raise ValueError(f'unknown {image_set}')
+
+
+def build_dataset2transform(args, image_set):
+    mot17_train = make_transforms_for_mot17('train', args)
+    mot17_test = make_transforms_for_mot17('val', args)
+
+    crowdhuman_train = make_transforms_for_crowdhuman('train', args)
+    dataset2transform_train = {'MOT17': mot17_train, 'CrowdHuman': crowdhuman_train}
+    dataset2transform_val = {'MOT17': mot17_test, 'CrowdHuman': mot17_test}
+    if image_set == 'train':
+        return dataset2transform_train
+    elif image_set == 'val':
+        return dataset2transform_val
+    else:
+        raise NotImplementedError()
+
+
+def build(image_set, args):
+    root = Path(args.mot_path)
+    assert root.exists(), f'provided MOT path {root} does not exist'
+    dataset2transform = build_dataset2transform(args, image_set)
+    if image_set == 'train':
+        data_txt_path = args.data_txt_path_train
+        dataset = DetMOTDetection(args, data_txt_path=data_txt_path, seqs_folder=root, dataset2transform=dataset2transform)
+    if image_set == 'val':
+        data_txt_path = args.data_txt_path_val
+        dataset = DetMOTDetection(args, data_txt_path=data_txt_path, seqs_folder=root, dataset2transform=dataset2transform)
+    return dataset
