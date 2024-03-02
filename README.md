@@ -37,3 +37,8 @@ Outputing the feature map from the transformer encoder (memoey) to use it as key
 6. main.py
 Adding args for masks in Loss coefficients
 '''
+
+'''
+7. misc.py
+Modifying import part to adjust for the current torchvision version
+'''
