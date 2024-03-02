@@ -54,6 +54,16 @@ Changinf the iou in _select_active_tracks
 '''
 
 '''
-10. Running
+10. main.py
+Adding segmentation parameters in optimizer
+'''
+
+'''
+11. engine.py
+Adding models gradients to tensorboard
+'''
+
+'''
+12. Running
 ./configs sbatch --j applemots_train_mask one_node_mask_MOTR_train.sh
 '''
