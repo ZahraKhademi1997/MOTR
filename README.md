@@ -52,3 +52,8 @@ Modifying PostProcessSegm function to incorporate in gradient.
 9. qim.py
 Changinf the iou in _select_active_tracks
 '''
+
+'''
+10. Running
+./configs sbatch --j applemots_train_mask one_node_mask_MOTR_train.sh
+'''
