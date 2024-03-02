@@ -1,54 +1,28 @@
-'''
-1. datasets.datapath
-1.1. Writing gt_generation.py
-Generating gt.txt file from the mask images 
---> content: frame_id, objcet_id, xmin, ymin, w, h, -1 , -1, -1, -1
---> Challenge: each object ids are extracted from the mask's pixel values, but there are some discrepancy in the pixel values within each frame, for instance in frame 000000.png in seq "0", I have obj_ids from 1 to 104 and then jumps to 228 and so on. To solve this challenge, I remapped the extracted ids to stay continuous in each frame.
+# Project Updates Documentation
 
-1.2.  prepare.py
-Adding function to create path files for Applemots
+This document outlines the recent enhancements and modifications to the codebase, structured by files and specific functionalities. Each point details the nature of the changes and their impact on the corresponding modules.
 
-1.3. Writing gen_labes_applemots.py
-To generate distinct label ext file for each frame and visualizing mask, bboxes and objesct ids on images
+## Dataset Modification
+- `gt_generation.py`: Generating gt.txt file from the mask images (Challenge: each object ids are extracted from the mask's pixel values, but there are some discrepancy in the pixel values within each frame which needs to be remapped to maintain continuous object ids)
+- `prepare.py`: Adding function to create path files for Applemots
+- `gen_labels_applemots.py`: To generate distinct label ext file for each frame and visualizing mask, bboxes and objesct ids on images
+- `joint.py`: Adding masks to the target instances Modifying data augmentation
+- `transforms.py`: Modifying mask parts
 
-2. dataset
-2.1. Editing joint.py
-Adding masks to the target instances
-Modifying data augmentation
+## Tools Modifications
+- `misc.py`: Modifying import part to adjust for the current torchvision version
+- `engine.py`: Adding models gradients to tensorboard
 
+## Main Modifications
+- `main.py`:
+1. Adding AppleMOTS data path
+2. Adding learning rates and losses to tensorboard
 
-3. main.py
-Adding AppleMOTS data path
+## Evaluation script
+- `apple_eval.py`: Writing apple_eval.py for applemots evaluation
 
-4. transforms.py
-Modifying mask parts
+## Execution Command
+```bash 
+configs/ sbatch --j applemots_motr_bbox applemots_one_node_train.sh
 
-'''
-
-
-'''
-5. engine.py
-Logging gradients to tensorboard
-
-6. main.py
-Logging learnign rates to tensorboard
-'''
-
-'''
-7. configs
-Adding applemots_one_node_train.sh for training on Hipergator
-'''
-
-'''
-8. Writing apple_eval.py
-Writing apple_eval.py for applemots evaluation
-'''
-
-'''
-9. misc.py
-Updating misc for torchvision
-'''
-'''
-10. Running
-/configs sbatch --j applemots_motr_bbox applemots_one_node_train.sh
-'''
+```
