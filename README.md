@@ -32,3 +32,8 @@ Outputing the feature map from the transformer encoder (memoey) to use it as key
 5.10. Adding mask losses in weight_dict in build function
 5.11. Including masks in losses list in build function
 '''
+
+'''
+6. main.py
+Adding args for masks in Loss coefficients
+'''
