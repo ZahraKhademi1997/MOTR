@@ -33,6 +33,7 @@ from .qim import build as build_query_interaction_layer
 from .memory_bank import build_memory_bank
 from .deformable_detr import SetCriterion, MLP
 from .segmentation import sigmoid_focal_loss
+from typing import NamedTuple, List, Dict
 
 
 class ClipMatcher(SetCriterion):
@@ -293,7 +294,28 @@ class ClipMatcher(SetCriterion):
 
     def forward(self, outputs, input_data: dict):
         # losses of each frame are calculated during the model's forwarding and are outputted by the model as outputs['losses_dict].
-        losses = outputs.pop("losses_dict")
+        def generate_dummy_losses(input_data, num_frames=2, num_aux_losses=5):
+            losses = {}
+            device = input_data['imgs'][0].device  # Change as per your device configuration
+
+            for frame in range(num_frames):
+                frame_key = f'frame_{frame}'
+                losses[f'{frame_key}_loss_ce'] = torch.tensor(0.1710, device=device)
+                losses[f'{frame_key}_loss_bbox'] = torch.tensor(0.1139, device=device)
+                losses[f'{frame_key}_loss_giou_bbox'] = torch.tensor(0.5528, device=device)
+                # losses[f'{frame_key}_loss_mask'] = torch.tensor(0.0883, device=device)
+                # losses[f'{frame_key}_loss_dice'] = torch.tensor(0.5817, device=device)
+                # losses[f'{frame_key}_cost_giou_mask_to_box'] = torch.tensor(2.5268, device=device)
+
+                for aux in range(num_aux_losses):
+                    aux_key = f'{frame_key}_aux{aux}'
+                    losses[f'{aux_key}_loss_ce'] = torch.tensor(0.1394, device=device)
+                    losses[f'{aux_key}_loss_bbox'] = torch.tensor(0.1300, device=device)
+                    losses[f'{aux_key}_loss_giou_bbox'] = torch.tensor(0.5607, device=device)
+            return losses
+                    
+        # losses = outputs.pop("losses_dict")
+        losses = generate_dummy_losses(input_data)
         num_samples = self.get_num_boxes(self.num_samples)
         for loss_name, loss in losses.items():
             losses[loss_name] /= num_samples
@@ -597,10 +619,67 @@ class MOTR(nn.Module):
             ret['ref_pts'] = ref_pts
         return ret
 
-    def forward(self, data: dict):
+    # def forward(self, data: dict):
+    def forward(self, data):
+        # if self.training:
+        #     self.criterion.initialize_for_single_clip(data['gt_instances'])
+        
+        ##########################################################################
+        ## (1) Defining dummy instances
+        # Define the structure of your Instances object
+        def _targets_to_instances(targets: dict, img_shape) -> Instances:
+            gt_instances = Instances(img_shape)
+            # gt_instances.masks = targets['masks']
+            gt_instances.boxes = targets['boxes']
+            gt_instances.labels = targets['labels']
+            gt_instances.obj_ids = targets['obj_ids']
+            gt_instances.area = targets['area']
+            return gt_instances
+
+        def create_dummy_targets(num_instances=79, img_shape=(736, 1021)):
+            # Create dummy data for each field
+            masks = torch.zeros(num_instances, img_shape[0], img_shape[1], dtype=torch.bool)
+            boxes = torch.rand(num_instances, 4)  # Random boxes
+            labels = torch.zeros(num_instances, dtype=torch.int64)
+            obj_ids = torch.arange(num_instances, dtype=torch.int64) + 3001000  # Example object IDs
+            area = torch.rand(num_instances)  # Random area values
+
+            # Create a targets dictionary
+            targets = {'boxes': boxes, 'labels': labels, 'obj_ids': obj_ids, 'area': area}
+            return targets
+        
+        # Create dummy targets and convert to Instances
+        dummy_targets = create_dummy_targets()
+
+
+        if isinstance(data, dict) and 'imgs' in data:
+            device = data['imgs'][0].device
+        else:
+            device = data.device
+
+
+        dummy_instances = _targets_to_instances(dummy_targets, (736, 1021)).to(device)
+    
         if self.training:
-            self.criterion.initialize_for_single_clip(data['gt_instances'])
-        frames = data['imgs']  # list of Tensor.
+            # self.criterion.initialize_for_single_clip(data['gt_instances'])
+            self.criterion.initialize_for_single_clip(dummy_instances)
+        ##########################################################################
+        
+        
+        # frames = data['imgs']  # list of Tensor.
+         ############################################
+        ## (2) getting tensor data instead of dict
+        # frames = data['imgs']  # list of Tensor.
+        if isinstance(data, torch.Tensor):
+            frames= data.unsqueeze(0)
+            self.mask_height , self.mask_width = frames[0].shape[-2:]
+            
+        elif isinstance(data, dict):
+            frames= data['imgs'][0].unsqueeze(0)
+            print(frames.shape)
+        # print('frames in motr-forward has the shape of:', frames.shape)
+        ############################################
+        
         outputs = {
             'pred_logits': [],
             'pred_boxes': [],
@@ -651,7 +730,18 @@ class MOTR(nn.Module):
             outputs['track_instances'] = track_instances
         else:
             outputs['losses_dict'] = self.criterion.losses_dict
-        return outputs
+            
+            
+        class ModelOutputs(NamedTuple):
+            pred_logits: List[torch.Tensor]
+            pred_boxes: List[torch.Tensor]
+            
+        model_outputs = ModelOutputs(
+                pred_logits=outputs['pred_logits'],
+                pred_boxes=outputs['pred_boxes']   
+            )
+         
+        return model_outputs
 
 
 def build(args):

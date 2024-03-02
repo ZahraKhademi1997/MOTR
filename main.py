@@ -29,6 +29,12 @@ import datasets.samplers as samplers
 from datasets import build_dataset, get_coco_api_from_dataset
 from engine import evaluate, train_one_epoch, train_one_epoch_mot
 from models import build_model
+from torch.utils.tensorboard import SummaryWriter
+# from torchviz import make_dot
+from collections import namedtuple
+from models.structures import Instances
+import sys
+import logging
 
 
 def get_args_parser():
@@ -152,11 +158,17 @@ def get_args_parser():
     parser.add_argument('--mot_path', default='/data/Dataset/mot', type=str)
     parser.add_argument('--input_video', default='figs/demo.mp4', type=str)
     parser.add_argument('--data_txt_path_train',
-                        default='./datasets/data_path/detmot17.train', type=str,
+                        default='./datasets/data_path/applemots.train', type=str,
                         help="path to dataset txt split")
     parser.add_argument('--data_txt_path_val',
-                        default='./datasets/data_path/detmot17.train', type=str,
+                        default='./datasets/data_path/applemots.val', type=str,
                         help="path to dataset txt split")
+    # parser.add_argument('--data_txt_path_train',
+    #                     default='./datasets/data_path/detmot17.train', type=str,
+    #                     help="path to dataset txt split")
+    # parser.add_argument('--data_txt_path_val',
+    #                     default='./datasets/data_path/detmot17.train', type=str,
+    #                     help="path to dataset txt split")
     parser.add_argument('--img_path', default='data/valid/JPEGImages/')
 
     parser.add_argument('--query_interaction_layer', default='QIM', type=str,
@@ -237,6 +249,23 @@ def main(args):
                 out = True
                 break
         return out
+    
+    
+    #################################################################
+    ##  Adding model to the tensorboard
+    writer_model = SummaryWriter('/blue/hmedeiros/khademi.zahra/model_graph_without_masks/model_graph/output/logs_model')
+    sample_batch = next(iter(data_loader_train))
+    # output_dir = "/home/zahra/Documents/Projects/prototype/MOTR-codes/model_graph/MOTR-main/output/data_structure.txt"
+    # with open (output_dir, "w") as f:
+    #     f.write(str( sample_batch))    
+    sample_images_list = sample_batch['imgs']
+    sample_image = sample_images_list[0].to(device)
+    output_model= model(sample_image)
+    # print('model output is:', output_model)
+    writer_model.add_graph(model, sample_image)
+    writer_model.close()
+    #################################################################
+    
 
     param_dicts = [
         {
