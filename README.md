@@ -21,8 +21,8 @@ This document outlines the recent enhancements and modifications to the codebase
 6. Adding pred_masks to outputs dictionary in forward function of the MOTR class
 7. Evoking the pred_masks in match_for_single_frame function in ClipMatcher class
 8. Calculating iou between masks:
-     5.1. Initiate mask and box iou in _generate_empty_tracks function in MOTR class
-     5.2. Calculating iou for box and mask in match_for_single_frame function in ClipMatcher class 
+     8.1. Initiate mask and box iou in _generate_empty_tracks function in MOTR class
+     8.2. Calculating iou for box and mask in match_for_single_frame function in ClipMatcher class 
 9. Adding pred_masks to TrackerPostProcess class 
 10. Adding mask losses in weight_dict in build function
 11. Including masks in losses list in build function
