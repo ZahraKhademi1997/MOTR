@@ -18,6 +18,9 @@ This document outlines the recent enhancements and modifications to the codebase
 1. Adding AppleMOTS data path
 2. Adding the add_graph to map model to tensorboard
 
+## Tools Modifications
+- `misc.py`: Modifying import part to adjust for the current torchvision version
+
 ## Execution Command
 ```bash 
 configs/ sbatch --j model_graph_without_mask one_node_graph_without_mask.sh
