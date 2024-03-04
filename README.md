@@ -55,3 +55,8 @@ This document outlines the recent enhancements and modifications to the codebase
 configs/ sbatch --j applemots_train_mask one_node_mask_MOTR_train.sh
 
 ```
+
+### Data transfer instruction
+'''
+rsync -ah --progress -e 'ssh -v -p 22' home_directory khademi.zahra@hpg.rc.ufl.edu:hipergator directory
+'''
