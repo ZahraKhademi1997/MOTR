@@ -194,6 +194,43 @@ def dice_loss(inputs, targets, num_boxes):
     loss = 1 - (numerator + 1) / (denominator + 1)
     return loss.sum() / num_boxes
 
+def weighted_dice_loss(inputs, targets, num_boxes, epsilon=1e-6):
+    """
+    Compute the modified DICE loss, incorporating dynamically calculated class weights to address class imbalance.
+    
+    Args:
+        inputs: A float tensor of arbitrary shape. The predictions for each example, after sigmoid activation.
+        targets: A float tensor with the same shape as inputs. Stores the binary classification label for each element in inputs (0 for the negative class and 1 for the positive class).
+        num_boxes: The number of boxes, used for normalizing the loss.
+        epsilon: A small value to avoid division by zero.
+    """
+    inputs = inputs.sigmoid()
+    inputs = inputs.flatten(1)
+    targets = targets.flatten(1)
+    
+    # Calculate class frequencies
+    class_frequencies = targets.sum(dim=0)
+    
+    # Calculate class weights inversely proportional to class frequencies
+    total_frequencies = targets.numel()
+    class_weights = total_frequencies / (class_frequencies + epsilon)
+    
+    # Normalize weights so that they sum to 1 (or another value depending on your preference)
+    class_weights = class_weights / class_weights.sum()
+
+    # Calculate the weighted numerator and denominator for the Dice coefficient
+    weighted_numerator = 2 * (inputs * targets).sum(dim=1)
+    weighted_denominator = (inputs + targets).sum(dim=1)
+    
+    # Calculate the Dice Loss
+    dice_loss = 1 - (weighted_numerator + epsilon) / (weighted_denominator + epsilon)
+    
+    # Apply class weights
+    weighted_loss = dice_loss * class_weights[1]  # Assuming class_weights[1] corresponds to the positive class weight
+    
+    # Return the mean loss normalized by num_boxes
+    return weighted_loss.sum() / num_boxes
+
 
 def sigmoid_focal_loss(inputs, targets, num_boxes, alpha: float = 0.25, gamma: float = 2, mean_in_dim1=True):
     """
@@ -224,7 +261,41 @@ def sigmoid_focal_loss(inputs, targets, num_boxes, alpha: float = 0.25, gamma: f
     else:
         return loss.sum() / num_boxes
 
+def dual_focal_loss(predicted_masks, gt_mask, a=1.0, b=1.0, q=2.0):
+    """
+    Compute the Dual Focal Loss between the predicted masks and ground truth masks.
 
+    Parameters:
+    - predicted_masks: Tensor of predicted masks with values between -1 and 1.
+    - gt_mask: Tensor of ground truth masks with values 0 and 1.
+    - a, b, q: Hyperparameters for the Dual Focal Loss calculation.
+
+    Returns:
+    - loss: Computed Dual Focal Loss.
+    """
+    # Convert predicted masks to probability range [0, 1]
+    predicted_probs = torch.sigmoid(predicted_masks)
+    
+    # Compute the first part of the loss: -y_i,n * log(z_i,n)
+    loss_1 = -gt_mask * torch.log(predicted_probs)
+    
+    # Compute the second part of the loss: b(1 - y_i,n) * log(q - z_i,n)
+    loss_2 = b * (1 - gt_mask) * torch.log(q - predicted_probs)
+    
+    # Compute the third part of the loss: a|y_i,n - z_i,n|
+    loss_3 = a * torch.abs(gt_mask - predicted_probs)
+    
+    # Sum the three parts to get the total loss
+    total_loss = loss_1 + loss_2 + loss_3
+    
+    # Normalize by num_boxes as in the sigmoid focal loss example
+    if total_loss.dim() > 1:
+        # Assuming the first dimension (dim=0) is batch, mean over dim=1 if total_loss is not a 1D tensor
+        return total_loss.mean(1).sum() / num_boxes
+    else:
+        # If total_loss is already 1D, just sum and normalize
+        return total_loss.sum() / num_boxes
+    
 class PostProcessSegm(nn.Module):
     def __init__(self, threshold=0.2):
         super().__init__()

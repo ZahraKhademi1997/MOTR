@@ -32,7 +32,10 @@ This document outlines the recent enhancements and modifications to the codebase
 
 ## Postprocessing Modifications
 - `qim.py`: Changing the iou in _select_active_tracks
-- `segmentation.py`: Modifying PostProcessSegm function to incorporate in gradient
+- `segmentation.py`: 
+1. Modifying PostProcessSegm function to incorporate in gradient
+2. Defining dual_focal_loss
+3. Defining weighted_dice_loss
 
 ## Tools Modifications
 - `misc.py`: Modifying import part to adjust for the current torchvision version
