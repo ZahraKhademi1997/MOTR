@@ -26,7 +26,7 @@ from util.misc import (NestedTensor, nested_tensor_from_tensor_list,
 
 from models.structures import Instances, Boxes, pairwise_iou, matched_boxlist_iou
 from .segmentation import (DETRsegm, PostProcessPanoptic, PostProcessSegm, MHAttentionMap, MaskHeadSmallConv,
-                           dice_loss, sigmoid_focal_loss)
+                           dice_loss, sigmoid_focal_loss, weighted_dice_loss, dual_focal_loss)
 from .backbone import build_backbone
 from .matcher import build_matcher
 from .deformable_transformer_plus import build_deforamble_transformer
@@ -218,8 +218,10 @@ class ClipMatcher(SetCriterion):
         target_masks = target_masks.flatten(1)
         target_masks = target_masks.view(src_masks.shape)
         losses = {
-            "loss_mask": sigmoid_focal_loss(src_masks, target_masks, num_boxes),
-            "loss_dice": dice_loss(src_masks, target_masks, num_boxes),
+            # "loss_mask": sigmoid_focal_loss(src_masks, target_masks, num_boxes),
+            # "loss_dice": dice_loss(src_masks, target_masks, num_boxes),
+            "loss_mask": dual_focal_loss(src_masks, target_masks, num_boxes),
+            "loss_dice": weighted_dice_loss(src_masks, target_masks, num_boxes),
         }
         # print('losses masks are:', losses)
         return losses
