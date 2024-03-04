@@ -29,14 +29,14 @@ This document outlines the recent enhancements and modifications to the codebase
 9. Adding pred_masks to TrackerPostProcess class 
 10. Adding mask losses in weight_dict in build function
 11. Including masks in losses list in build function
-12. Replacing pevious mask losses with dual focal loss and weighted dice loss.
+12. Replacing pevious mask losses with dual focal loss and generalized dice loss.
 
 ## Postprocessing Modifications
 - `qim.py`: Changing the iou in _select_active_tracks
 - `segmentation.py`: 
 1. Modifying PostProcessSegm function to incorporate in gradient
 2. Defining dual_focal_loss
-3. Defining weighted_dice_loss
+3. Defining generlized_dice_loss
 
 ## Tools Modifications
 - `misc.py`: Modifying import part to adjust for the current torchvision version

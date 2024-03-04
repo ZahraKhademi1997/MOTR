@@ -194,42 +194,27 @@ def dice_loss(inputs, targets, num_boxes):
     loss = 1 - (numerator + 1) / (denominator + 1)
     return loss.sum() / num_boxes
 
-def weighted_dice_loss(inputs, targets, num_boxes, epsilon=1e-6):
-    """
-    Compute the modified DICE loss, incorporating dynamically calculated class weights to address class imbalance.
-    
-    Args:
-        inputs: A float tensor of arbitrary shape. The predictions for each example, after sigmoid activation.
-        targets: A float tensor with the same shape as inputs. Stores the binary classification label for each element in inputs (0 for the negative class and 1 for the positive class).
-        num_boxes: The number of boxes, used for normalizing the loss.
-        epsilon: A small value to avoid division by zero.
-    """
-    inputs = inputs.sigmoid()
-    inputs = inputs.flatten(1)
+def generalized_dice_loss(inputs, targets, num_boxes):
+    inputs = inputs.sigmoid().flatten(1)
     targets = targets.flatten(1)
-    
-    # Calculate class frequencies
-    class_frequencies = targets.sum(dim=0)
-    
-    # Calculate class weights inversely proportional to class frequencies
-    total_frequencies = targets.numel()
-    class_weights = total_frequencies / (class_frequencies + epsilon)
-    
-    # Normalize weights so that they sum to 1 (or another value depending on your preference)
-    class_weights = class_weights / class_weights.sum()
 
-    # Calculate the weighted numerator and denominator for the Dice coefficient
-    weighted_numerator = 2 * (inputs * targets).sum(dim=1)
-    weighted_denominator = (inputs + targets).sum(dim=1)
-    
-    # Calculate the Dice Loss
-    dice_loss = 1 - (weighted_numerator + epsilon) / (weighted_denominator + epsilon)
-    
+    # Calculate pixel frequency for each class (assuming binary classification for simplicity)
+    pixel_freq = targets.sum(dim=0)
+
+    # Calculate class weights inversely proportional to the square of pixel frequencies
+    class_weights = 1 / (pixel_freq**2 + 1e-6)
+    class_weights /= class_weights.sum()  # Normalize class weights
+
     # Apply class weights
-    weighted_loss = dice_loss * class_weights[1]  # Assuming class_weights[1] corresponds to the positive class weight
+    weighted_numerator = 2 * (inputs * targets).sum(dim=1) * class_weights[1]  # Assuming class 1 is the class of interest
+    weighted_denominator = (inputs + targets).sum(dim=1) * class_weights[1]  # Apply weights to both inputs and targets
+
+    # Calculate Generalized Dice Loss
+    dice_loss = 1 - (weighted_numerator + 1e-6) / (weighted_denominator + 1e-6)
     
-    # Return the mean loss normalized by num_boxes
-    return weighted_loss.sum() / num_boxes
+    # Normalize by num_boxes
+    return dice_loss.sum() / num_boxes
+
 
 
 def sigmoid_focal_loss(inputs, targets, num_boxes, alpha: float = 0.25, gamma: float = 2, mean_in_dim1=True):
@@ -261,7 +246,7 @@ def sigmoid_focal_loss(inputs, targets, num_boxes, alpha: float = 0.25, gamma: f
     else:
         return loss.sum() / num_boxes
 
-def dual_focal_loss(predicted_masks, gt_mask, a=1.0, b=1.0, q=2.0):
+def dual_focal_loss(predicted_masks, gt_mask, num_boxes, a=0.5, b=0.75, q=1.25):
     """
     Compute the Dual Focal Loss between the predicted masks and ground truth masks.
 
