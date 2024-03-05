@@ -630,7 +630,7 @@ class MOTR(nn.Module):
                 pos.append(pos_l)
         
         # Feeding the features from the second layer of the backbone to transformer for mask
-        hs_mask,  init_reference_mask, inter_references_mask, enc_outputs_class_mask, enc_outputs_coord_unact_mask, memory_mask = self.transformer([srcs[1]], [masks[1]], [pos[31]],track_instances.query_pos, ref_pts=track_instances.ref_pts)
+        hs_mask,  init_reference_mask, inter_references_mask, enc_outputs_class_mask, enc_outputs_coord_unact_mask, memory_mask = self.transformer([srcs[1]], [masks[1]], [pos[1]],track_instances.query_pos, ref_pts=track_instances.ref_pts)
         # Feeding the features from all layers of the backbone to transformer for aux losses
         hs, init_reference, inter_references, enc_outputs_class, enc_outputs_coord_unact, memory= self.transformer(srcs, masks, pos, track_instances.query_pos, ref_pts=track_instances.ref_pts)
 

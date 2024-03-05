@@ -134,7 +134,7 @@ class QueryInteractionModule(QueryInteractionBase):
         track_instances: Instances = data['track_instances']
         if self.training:
             # Solving the device problem in multiple gpus
-             track_instances = track_instances
+            track_instances = track_instances
              
             # changing track_instances.iou to track_instances.iou_boxes --> motr.py
             # active_idxes = (track_instances.obj_idxes >= 0) & (track_instances.iou > 0.5)
