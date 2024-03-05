@@ -30,6 +30,7 @@ This document outlines the recent enhancements and modifications to the codebase
 10. Adding mask losses in weight_dict in build function
 11. Including masks in losses list in build function
 12. Replacing pevious mask losses with dual focal loss and generalized dice loss.
+13. Removing segmentation postprocessing frim the model and replace it with interpolation
 
 ## Postprocessing Modifications
 - `qim.py`: Changing the iou in _select_active_tracks

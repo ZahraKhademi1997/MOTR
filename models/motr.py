@@ -545,7 +545,6 @@ class MOTR(nn.Module):
         hidden_dim, nheads = self.transformer.d_model, self.transformer.nhead
         self.bbox_attention = MHAttentionMap(hidden_dim, hidden_dim, nheads, dropout=0)
         self.mask_head = MaskHeadSmallConv(hidden_dim + nheads, [2048, 1024, 512], hidden_dim)
-        self.postprocessor = PostProcessSegm(threshold = 0.2)
         ##############################################
         
         self.post_process = TrackerPostProcess()
@@ -631,7 +630,7 @@ class MOTR(nn.Module):
                 pos.append(pos_l)
         
         # Feeding the features from the second layer of the backbone to transformer for mask
-        hs_mask,  init_reference_mask, inter_references_mask, enc_outputs_class_mask, enc_outputs_coord_unact_mask, memory_mask = self.transformer([srcs[3]], [masks[3]], [pos[3]],track_instances.query_pos, ref_pts=track_instances.ref_pts)
+        hs_mask,  init_reference_mask, inter_references_mask, enc_outputs_class_mask, enc_outputs_coord_unact_mask, memory_mask = self.transformer([srcs[1]], [masks[1]], [pos[31]],track_instances.query_pos, ref_pts=track_instances.ref_pts)
         # Feeding the features from all layers of the backbone to transformer for aux losses
         hs, init_reference, inter_references, enc_outputs_class, enc_outputs_coord_unact, memory= self.transformer(srcs, masks, pos, track_instances.query_pos, ref_pts=track_instances.ref_pts)
 
@@ -660,30 +659,16 @@ class MOTR(nn.Module):
         
         
         # Changing the memory shape to calculate masks
-        bs, c, h, w = srcs[3].shape
+        bs, c, h, w = srcs[1].shape
         memory_mask = memory_mask.view(bs, c, h, w)
-        bbox_mask = self.bbox_attention(hs_mask[-1], memory_mask, mask=masks[3])
-        seg_mask = self.mask_head(srcs[3], bbox_mask, [features[2].tensors, features[1].tensors, features[0].tensors])
+        bbox_mask = self.bbox_attention(hs_mask[-1], memory_mask, mask=masks[1])
+        seg_mask = self.mask_head(srcs[1], bbox_mask, [features[2].tensors, features[1].tensors, features[0].tensors])
         pred_maskss = seg_mask.view(bs, outputs_coord[-1].shape[1], seg_mask.shape[-2], seg_mask.shape[-1])
         
         # Resizing masks
-        max_target_sizes = []
-        for tensor in samples.tensors:
-            height, width = tensor.shape[-2], tensor.shape[-1]
-        max_target_sizes.append([height, width])
-        
-        max_target_sizes = max_target_sizes
-        max_target_sizes = torch.tensor(max_target_sizes)
-        orig_target_sizes = []
-        for mask in pred_maskss:
-            msk = mask.squeeze(0)
-            x_shape, y_shape = msk.shape[1], msk.shape[2]
-            shape = [x_shape, y_shape]
-        orig_target_sizes.append(shape)
-        orig_target_sizes = torch.tensor(orig_target_sizes)
-        postprocessed_masks = self.postprocessor([], {'pred_masks': pred_maskss}, orig_target_sizes, max_target_sizes)
+        max_h, max_w = samples.tensors.shape[-2], samples.tensors.shape[-1]
+        postprocessed_masks = F.interpolate(pred_maskss , size=(max_h, max_w), mode="bilinear", align_corners=False)
         pred_masks = postprocessed_masks.to(torch.float32)
-        
         
         # Adding pred_masks to out
         # print('outputs_class[-1] in motr has the shape of:', outputs_class[-1].shape)
