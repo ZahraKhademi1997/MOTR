@@ -30,6 +30,7 @@ import os
 import datetime
 import random
 import torchvision.transforms.functional as F
+from pycocotools import mask as mask_utils
 
 
 class DetMOTDetection:
@@ -51,7 +52,7 @@ class DetMOTDetection:
                             for x in self.img_files]
         
         # (1)
-        self.mask_files = [(x.replace('images', 'instances'))
+        self.mask_files = [(x.replace('images', 'masks_with_ids').replace('.png', '.txt').replace('.jpg', '.txt'))
                             for x in self.img_files]
         
         # The number of images per sample: 1 + (num_frames - 1) * interval.
@@ -115,29 +116,59 @@ class DetMOTDetection:
     
     # (4)
     def _pre_single_frame(self, idx: int):
+        
+        # Converting RLE to binary mask
+        def decode_RLE_to_mask(rle_str, h, w):
+            rle = {
+                'counts': rle_str,
+                'size': [h, w]
+            }
+            mask = mask_utils.decode(rle)
+            return mask
+
+
+        # Visualization of the gt attributes
+        def plot_frame_with_annotations(img, targets):
+            """
+            Plot the image with bounding boxes, masks, and object IDs from the targets.
+
+            :param img: PIL Image object of the frame.
+            :param targets: Dictionary containing 'boxes', 'masks', 'obj_ids' etc.
+            """
+            # Convert image to numpy array
+            np_img = np.array(img)
+
+            # Create a figure and axis for plotting
+            fig, ax = plt.subplots(1, figsize=(12, 8))
+            ax.imshow(np_img)
+
+            boxes = targets['boxes'].cpu().numpy()  # Assuming targets['boxes'] is a tensor
+            masks = targets['masks']  # Assuming targets['masks'] is a list of tensors
+            obj_ids = targets['obj_ids'].cpu().numpy()  # Assuming targets['obj_ids'] is a tensor
+
+            for box, mask, obj_id in zip(boxes, masks, obj_ids):
+                # Draw the bounding box
+                rect = patches.Rectangle((box[0], box[1]), box[2] - box[0], box[3] - box[1], linewidth=2, edgecolor='b', facecolor='none')
+                ax.add_patch(rect)
+
+                # Label the bounding box with the object ID
+                ax.text(box[0], box[1], f'ID: {obj_id}', bbox=dict(facecolor='blue', alpha=0.5), clip_on=True, color='white')
+
+                # Overlay the mask
+                mask_np = mask.cpu().numpy()
+                ax.imshow(np.ma.masked_where(mask_np == 0, mask_np), alpha=0.5, cmap='cool')
+
+            plt.show()
+    
+        
         img_path = self.img_files[idx]
         label_path = self.label_files[idx]
-        mask_path = self.mask_files[idx]  # Assuming you have a way to access mask_files similar to img_files and label_files
+        mask_path = self.mask_files[idx]  
 
         img = Image.open(img_path)
-        mask = Image.open(mask_path)
-        mask_np = np.array(mask)
-
-        w, h = img.size
-        assert w > 0 and h > 0, f"Invalid image {img_path} with shape {w}x{h}"
+        w, h = img._size
         targets = {}
         
-        if osp.isfile(label_path):
-            labels0 = np.loadtxt(label_path, dtype=np.float32).reshape(-1, 6)
-
-            labels = labels0.copy()
-            labels[:, 2] = w * (labels0[:, 2] - labels0[:, 4] / 2)
-            labels[:, 3] = h * (labels0[:, 3] - labels0[:, 5] / 2)
-            labels[:, 4] = w * (labels0[:, 2] + labels0[:, 4] / 2)
-            labels[:, 5] = h * (labels0[:, 3] + labels0[:, 5] / 2)
-        else:
-            raise ValueError('Invalid label path: {}'.format(label_path))
-
         video_name = '/'.join(label_path.split('/')[:-1])+ '/img1'
         obj_idx_offset = self.video_dict[video_name] * 1000000  # 1000000 unique ids is enough for a video.
         
@@ -160,23 +191,32 @@ class DetMOTDetection:
         targets['size'] = torch.as_tensor([h, w])
         targets['orig_size'] = torch.as_tensor([h, w])
 
-        for label in labels:
-            obj_id = int(label[1]) + obj_idx_offset if label[1] >= 0 else int(label[1])
-            bbox = label[2:6]  # Assuming bbox is already in the correct format
-            cropped_mask = mask_np[int(bbox[1]):int(bbox[3]), int(bbox[0]):int(bbox[2])]
+        label_data = np.loadtxt(label_path, dtype=np.float32).reshape(-1, 7)
 
-            # Check if the cropped area contains any part of the mask
-            if cropped_mask.any():
-                # Create a new mask for the bounding box area
-                new_mask = np.zeros(mask_np.shape[:2], dtype=np.uint8)
-                new_mask[int(bbox[1]):int(bbox[3]), int(bbox[0]):int(bbox[2])] = (cropped_mask == obj_id).astype(np.uint8)
+        # Process each object in label file
+        for label in label_data:
+            frame_id, object_id, bbox, obj_id_orig = int(label[0]), int(label[1]), label[2:6], int(label[6])
+            x1, y1, x2, y2 = w * (bbox[0] - bbox[2] / 2), h * (bbox[1] - bbox[3] / 2), w * (bbox[0] + bbox[2] / 2), h * (bbox[1] + bbox[3] / 2)
 
-                targets['boxes'].append(label[2:6].tolist())
-                targets['area'].append((bbox[2] - bbox[0]) * (bbox[3] - bbox[1]))
-                targets['iscrowd'].append(0)
-                targets['labels'].append(0)  # Assuming single class for simplicity
-                targets['obj_ids'].append(obj_id)
-                targets['masks'].append(torch.tensor(new_mask, dtype=torch.uint8))
+            # Load mask data
+            with open(mask_path, 'r') as f:
+                for line in f:
+                    parts = line.strip().split(',')
+                    m_fid, m_obj_id, m_h, m_w, rle_str = int(parts[0]), int(parts[1]), int(parts[2]), int(parts[3]), parts[4]
+                    # Check if the frame and object id from mask file match with label file
+                    if frame_id == m_fid and obj_id_orig == m_obj_id:
+                        # Decode mask from RLE
+                        mask = decode_RLE_to_mask(rle_str, m_h, m_w)
+
+                        # Append data to targets
+                        targets['boxes'].append([x1, y1, x2, y2])
+                        targets['masks'].append(mask)
+                        targets['area'].append((x2 - x1) * (y2 - y1))
+                        targets['labels'].append(0)  
+                        targets['iscrowd'].append(0)
+                        obj_id = object_id + obj_idx_offset if object_id >= 0 else object_id
+                        targets['obj_ids'].append(obj_id)
+                        break  # Stop searching once a matching object is found
 
         # Convert lists to tensors
         targets['boxes'] = torch.as_tensor(targets['boxes'], dtype=torch.float32).reshape(-1, 4)
@@ -184,8 +224,10 @@ class DetMOTDetection:
         targets['iscrowd'] = torch.as_tensor(targets['iscrowd'])
         targets['labels'] = torch.as_tensor(targets['labels'])
         targets['obj_ids'] = torch.as_tensor(targets['obj_ids'])
+        targets['masks'] = [torch.from_numpy(mask) for mask in targets['masks']]
         targets['masks'] = torch.stack(targets['masks'])
-        # print(targets)
+        print(targets)
+        plot_frame_with_annotations(img, targets)
         return img, targets
 
     def _get_sample_range(self, start_idx):

@@ -8,6 +8,7 @@ This document outlines the recent enhancements and modifications to the codebase
 - `gen_labels_applemots.py`: To generate distinct label ext file for each frame and visualizing mask, bboxes and objesct ids on images
 - `joint.py`: Adding masks to the target instances Modifying data augmentation
 - `transforms.py`: Modifying mask parts
+- `gen_mask_applemots.py`: Creating RLE mask for more efficient ID assigenment 
 
 ## Transformer Module Enhancements
 - `deformable_transformer_plus.py` : Outputing the feature map from the transformer encoder (memoey) to use it as key for the MHAttention head
