@@ -187,11 +187,17 @@ def dice_loss(inputs, targets, num_boxes):
                  classification label for each element in inputs
                 (0 for the negative class and 1 for the positive class).
     """
-    inputs = inputs.sigmoid()
+    eps = 1e-5
+    # inputs = inputs.sigmoid()
     inputs = inputs.flatten(1)
-    numerator = 2 * (inputs * targets).sum(1)
-    denominator = inputs.sum(-1) + targets.sum(-1)
-    loss = 1 - (numerator + 1) / (denominator + 1)
+    # numerator = 2 * (inputs * targets).sum(1)
+    # denominator = inputs.sum(-1) + targets.sum(-1)
+    # loss = 1 - (numerator + 1) / (denominator + 1)
+    
+    intersection = (inputs * targets).sum(dim=1)
+    union = (inputs ** 2.0).sum(dim=1) + (targets ** 2.0).sum(dim=1) + eps
+    loss = 1. - (2 * intersection / union)
+        
     return loss.sum() / num_boxes
 
 def generalized_dice_loss(inputs, targets, num_boxes):

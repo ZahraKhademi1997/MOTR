@@ -219,9 +219,9 @@ class ClipMatcher(SetCriterion):
         target_masks = target_masks.view(src_masks.shape)
         losses = {
             # "loss_mask": sigmoid_focal_loss(src_masks, target_masks, num_boxes),
-            # "loss_dice": dice_loss(src_masks, target_masks, num_boxes),
+            "loss_dice": dice_loss(src_masks, target_masks, num_boxes),
             "loss_mask": dual_focal_loss(src_masks, target_masks, num_boxes),
-            "loss_dice": generalized_dice_loss(src_masks, target_masks, num_boxes),
+            # "loss_dice": generalized_dice_loss(src_masks, target_masks, num_boxes),
         }
         # print('losses masks are:', losses)
         return losses
