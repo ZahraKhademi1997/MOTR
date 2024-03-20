@@ -15,27 +15,11 @@ def compute_iou(mask1, mask2):
     intersection = torch.logical_and(mask1, mask2)
     union = torch.logical_or(mask1, mask2)
 
-    # unique_values_mask1 = np.unique(mask1)
-    # unique_values_mask2 = np.unique(mask2)
+    # unique_values_mask1 = torch.unique(mask1)
+    # unique_values_mask2 = torch.unique(mask2)
     # print("Unique values in mask1:", unique_values_mask1)
     # print("Unique values in mask2:", unique_values_mask2)
     
-    # # Verify mask1 and mask2 are valid binary masks
-    # if not np.all(np.logical_or(mask1 == 0, mask1 == 1)):
-    #     print("Invalid binary mask detected in mask1.")
-    # if not np.all(np.logical_or(mask2 == 0, mask2 == 1)):
-    #     print("Invalid binary mask detected in mask2.")
-
-    # Check for NaN values in intersection and union
-    # if np.isnan(np.sum(intersection)):
-    #     print("NaN values detected in the intersection array.")
-    # if np.isnan(np.sum(union)):
-    #     print("NaN values detected in the union array.")
-
-    # Convert intersection and union to float
-    # intersection_sum = np.sum(intersection).astype(float)
-    # union_sum = np.sum(union).astype(float)
-
     # intersection_sum = torch.sum(intersection).detach().cpu().numpy().astype(float)
     # union_sum = torch.sum(union).detach().cpu().numpy().astype(float)
     intersection_sum = torch.sum(intersection)
