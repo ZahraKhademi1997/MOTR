@@ -171,6 +171,8 @@ def get_args_parser():
                         help="L1 box coefficient in the matching cost")
     parser.add_argument('--set_cost_giou', default=2, type=float,
                         help="giou box coefficient in the matching cost")
+    parser.add_argument('--set_cost_mask', default=2, type=float,
+                        help="Mask IOU loss coefficient in the matching cost")
 
     # * Loss coefficients
     parser.add_argument('--cls_loss_coef', default=2, type=float)

@@ -33,6 +33,9 @@ This document outlines the recent enhancements and modifications to the codebase
 12. Replacing pevious mask losses with dual focal loss and generalized dice loss.
 13. Removing segmentation postprocessing frim the model and replace it with interpolation
 
+## Association Modifications
+- `matcher.py`: Adding the MIOU to the cost function
+
 ## Postprocessing Modifications
 - `qim.py`: Changing the iou in _select_active_tracks
 - `segmentation.py`: 
@@ -44,6 +47,8 @@ This document outlines the recent enhancements and modifications to the codebase
 - `misc.py`: Modifying import part to adjust for the current torchvision version
 - `engine.py`: Adding models gradients to tensorboard
 
+## Utils Modifications
+- `mask_ops.py`: Defining the mask iou 
 
 ## Main Modifications
 - `main.py`:
