@@ -1,5 +1,13 @@
 # Project Updates Documentation
 
+## TODO
+- Using the whole queries in bbox_attention
+- using conv instead of interpolation 
+- using the masks before out layer in the mask head
+
+
+
+
 This document outlines the recent enhancements and modifications to the codebase, structured by files and specific functionalities. Each point details the nature of the changes and their impact on the corresponding modules.
 
 ## Dataset Modification
@@ -42,6 +50,7 @@ This document outlines the recent enhancements and modifications to the codebase
 1. Modifying PostProcessSegm function to incorporate in gradient
 2. Defining dual_focal_loss
 3. Defining generlized_dice_loss
+4. Replaing the out_lay in MaskHeadSmallConv with 1*1Conv and adding threshold
 
 ## Tools Modifications
 - `misc.py`: Modifying import part to adjust for the current torchvision version

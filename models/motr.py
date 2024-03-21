@@ -342,6 +342,9 @@ class ClipMatcher(SetCriterion):
         # step8. calculate losses.
         self.num_samples += len(gt_instances_i) + num_disappear_track
         self.sample_device = pred_logits_i.device
+        
+    #  def loss_masks(self, outputs, gt_instances: List[Instances], indices, num_boxes):
+
         for loss in self.losses:
             new_track_loss = self.get_loss(loss,
                                            outputs=outputs_i,

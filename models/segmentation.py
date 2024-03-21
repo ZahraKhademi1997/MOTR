@@ -91,7 +91,8 @@ class MaskHeadSmallConv(nn.Module):
         self.gn4 = torch.nn.GroupNorm(8, inter_dims[3])
         self.lay5 = torch.nn.Conv2d(inter_dims[3], inter_dims[4], 3, padding=1)
         self.gn5 = torch.nn.GroupNorm(8, inter_dims[4])
-        self.out_lay = torch.nn.Conv2d(inter_dims[4], 1, 3, padding=1)
+        # self.out_lay = torch.nn.Conv2d(inter_dims[4], 1, 3, padding=1)
+        self.out_lay = torch.nn.Conv2d(inter_dims[4], 1, 1, padding=1)
 
         self.dim = dim
 
@@ -105,6 +106,17 @@ class MaskHeadSmallConv(nn.Module):
                 nn.init.constant_(m.bias, 0)
 
     def forward(self, x, bbox_mask, fpns):
+        
+        def save_image(feature_map, layer_name):
+            image_path = "/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR-mask-AppleMots/output/mask_segmentation_py"
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            for i in range(feature_map.size(0)):
+                plt.imshow(feature_map[i, 0].detach().cpu().numpy(), cmap='gray')
+                plt.title(f"{layer_name}_{i}")
+                filename = f"{layer_name}_{i}_{timestamp}.png"
+                plt.savefig(os.path.join(image_path, filename))
+                plt.close()
+                
         def expand(tensor, length):
             return tensor.unsqueeze(1).repeat(1, int(length), 1, 1, 1).flatten(0, 1)
 
@@ -142,6 +154,8 @@ class MaskHeadSmallConv(nn.Module):
         x = F.relu(x)
 
         x = self.out_lay(x)
+        x = F.relu(x)
+        # save_image(x, 'out_lay')
         return x
 
 
