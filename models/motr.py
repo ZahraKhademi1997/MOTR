@@ -670,7 +670,7 @@ class MOTR(nn.Module):
         
         # Resizing masks
         max_h, max_w = samples.tensors.shape[-2], samples.tensors.shape[-1]
-        postprocessed_masks = F.interpolate(pred_maskss , size=(max_h, max_w), mode="bilinear", align_corners=False)
+        postprocessed_masks = F.interpolate(pred_maskss , size=(max_h, max_w), mode="nearest")
         pred_masks = postprocessed_masks.to(torch.float32)
         
         # Adding pred_masks to out

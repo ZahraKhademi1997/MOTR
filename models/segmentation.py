@@ -91,8 +91,8 @@ class MaskHeadSmallConv(nn.Module):
         self.gn4 = torch.nn.GroupNorm(8, inter_dims[3])
         self.lay5 = torch.nn.Conv2d(inter_dims[3], inter_dims[4], 3, padding=1)
         self.gn5 = torch.nn.GroupNorm(8, inter_dims[4])
-        # self.out_lay = torch.nn.Conv2d(inter_dims[4], 1, 3, padding=1)
-        self.out_lay = torch.nn.Conv2d(inter_dims[4], 1, 1, padding=1)
+        self.out_lay = torch.nn.Conv2d(inter_dims[4], 1, 3, padding=1)
+        # self.out_lay = torch.nn.Conv2d(inter_dims[4], 1, 1, padding=1)
 
         self.dim = dim
 
