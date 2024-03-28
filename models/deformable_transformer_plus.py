@@ -148,6 +148,7 @@ class DeformableTransformer(nn.Module):
             mask = mask.flatten(1)
             pos_embed = pos_embed.flatten(2).transpose(1, 2)
             lvl_pos_embed = pos_embed + self.level_embed[lvl].view(1, 1, -1)
+            
             lvl_pos_embed_flatten.append(lvl_pos_embed)
             src_flatten.append(src)
             mask_flatten.append(mask)
@@ -157,9 +158,62 @@ class DeformableTransformer(nn.Module):
         spatial_shapes = torch.as_tensor(spatial_shapes, dtype=torch.long, device=src_flatten.device)
         level_start_index = torch.cat((spatial_shapes.new_zeros((1, )), spatial_shapes.prod(1).cumsum(0)[:-1]))
         valid_ratios = torch.stack([self.get_valid_ratio(m) for m in masks], 1)
-
+        # print('spatial_shapes in deformbale_transformer_plus is:', spatial_shapes) #tensor([[108, 192], ...], device='cuda:0')
+        # print('valid_ratios in deformbale_transformer_plus is:', valid_ratios) #tensor([[[1., 1.]]], device='cuda:0')
+        # print('src_flatten in deformbale_transformer_plus is:', src_flatten.shape) #torch.Size([1, 20736, 256])
+        # print('mask_flatten in deformbale_transformer_plus is:', mask_flatten.shape) #torch.Size([1, 20736])
+        # print('level_start_index in deformbale_transformer_plus is:', level_start_index) #torch.Size([1, 20736, 256])
+        # print('lvl_pos_embed_flatten in deformbale_transformer_plus is:', lvl_pos_embed_flatten.shape) #tensor([0], device='cuda:0') -->tensor([    0, 20736], device='cuda:0') --> tensor([    0, 20736, 25920], device='cuda:0') -->tensor([    0, 20736, 25920, 27216], device='cuda:0')
+       
+        
         # encoder
-        memory = self.encoder(src_flatten, spatial_shapes, level_start_index, valid_ratios, lvl_pos_embed_flatten, mask_flatten)
+        ########################################################################################################################
+        # (1) Making changes --> Not used yet needs review because bboxes not working well with this calculated memory
+        # whole_memory = []
+        # spatial_shape_mm = []
+        # lvl_pos_embed_mm =[]
+        # spatial_shapes_m = []
+        # for lvl, (src,mask,pos_embed) in enumerate(zip(srcs, masks, pos_embeds)):
+        #     bs, c, h, w = src.shape
+        #     spatial_shape_m = (h,w)
+        #     spatial_shape_mm.append(spatial_shape_m)
+        #     spatial_shape_mm = torch.as_tensor(spatial_shape_mm, dtype=torch.long, device=src_flatten.device)
+            
+        #     spatial_shapes_m.append(spatial_shape_m)
+        #     spatial_shapes_mm = torch.as_tensor(spatial_shapes_m, dtype=torch.long, device=src_flatten.device)
+            
+            
+        #     src_m = src.flatten(2).transpose(1, 2)
+        #     mask_m = mask.flatten(1)
+            
+        #     pos_embed_m = pos_embed.flatten(2).transpose(1, 2)
+        #     lvl_pos_embed_m = pos_embed_m + self.level_embed[lvl].view(1, 1, -1)
+        #     lvl_pos_embed_mm.append(lvl_pos_embed_m)
+        #     lvl_pos_embed_mm = torch.cat(lvl_pos_embed_mm, 1)
+            
+        #     level_start = torch.cat((spatial_shapes_mm.new_zeros((1, )), spatial_shapes_mm.prod(1).cumsum(0)[:-1]))
+            
+        #     valid_ratios_m = torch.stack([self.get_valid_ratio(mask)], 1)
+        #     # print('spatial_shapes in deformbale_transformer_plus is:', spatial_shape_mm) # tensor([[14, 24]], device='cuda:0')
+        #     # print('valid_ratios in deformbale_transformer_plus is:', valid_ratios_m) #tensor([[[1., 1.]]], device='cuda:0')
+        #     # print('src_flatten in deformbale_transformer_plus is:', src_m.shape)
+        #     # print('mask_flatten in deformbale_transformer_plus is:', mask_m.shape)
+        #     # print('lvl_pos_embed_flatten in deformbale_transformer_plus is:', lvl_pos_embed_mm.shape)
+        #     # print('level_start_index in deformbale_transformer_plus is:',  level_start)
+            
+        #     memory_m = self.encoder(src_m, spatial_shape_mm, level_start, valid_ratios_m, lvl_pos_embed_mm, mask_m)
+        #     # print('memory_m in the deformable_transformer_plus in the loop has the shape of:', memory_m.shape) 
+        #     whole_memory.append(memory_m)
+        #     spatial_shape_mm = []
+        #     lvl_pos_embed_mm =[]    
+        # for memory in whole_memory:
+        #     print('memory in deformable_transformer_plus has the shape os:', memory.shape)
+        # memory_new = torch.cat(whole_memory, dim = 1) #torch.Size([1, 27552, 256])
+        # print(memory_new)
+        # print('memory_new in deformable_transformer_plus has the shape of:', memory_new.shape)
+        ########################################################################################################################
+        
+        memory = self.encoder(src_flatten, spatial_shapes, level_start_index, valid_ratios, lvl_pos_embed_flatten, mask_flatten) # For bboxes
         # prepare input for decoder
         bs, _, c = memory.shape
         if self.two_stage:
@@ -194,7 +248,13 @@ class DeformableTransformer(nn.Module):
         inter_references_out = inter_references
         if self.two_stage:
             return hs, init_reference_out, inter_references_out, enc_outputs_class, enc_outputs_coord_unact
+        #######################################################################
+        # (1) Adding memory to output in format that segmentation head expected
+        # return hs, init_reference_out, inter_references_out, None, None
+        # return hs, init_reference_out, inter_references_out, None, None, memory.permute(1, 2, 0).view(bs, c, h, w)
+        # return hs, init_reference_out, inter_references_out, None, None, whole_memory 
         return hs, init_reference_out, inter_references_out, None, None, memory
+    #######################################################################
 
 
 class DeformableTransformerEncoderLayer(nn.Module):
@@ -463,5 +523,9 @@ def build_deforamble_transformer(args):
         sigmoid_attn=args.sigmoid_attn,
         extra_track_attn=args.extra_track_attn,
     )
+
+
+
+
 
 

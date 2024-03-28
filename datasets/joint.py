@@ -52,8 +52,8 @@ class DetMOTDetection:
                             for x in self.img_files]
         
         # (1)
-        self.mask_files = [(x.replace('images', 'masks_with_ids').replace('.png', '.txt').replace('.jpg', '.txt'))
-                            for x in self.img_files]
+        # self.mask_files = [(x.replace('images', 'masks_with_ids').replace('.png', '.txt').replace('.jpg', '.txt'))
+        #                     for x in self.img_files]
         
         # The number of images per sample: 1 + (num_frames - 1) * interval.
         # The number of valid samples: num_images - num_image_per_sample + 1.
@@ -163,7 +163,7 @@ class DetMOTDetection:
         
         img_path = self.img_files[idx]
         label_path = self.label_files[idx]
-        mask_path = self.mask_files[idx]  
+        # mask_path = self.mask_files[idx]  
 
         img = Image.open(img_path)
         w, h = img._size
@@ -191,32 +191,38 @@ class DetMOTDetection:
         targets['size'] = torch.as_tensor([h, w])
         targets['orig_size'] = torch.as_tensor([h, w])
 
-        label_data = np.loadtxt(label_path, dtype=np.float32).reshape(-1, 7)
+        # label_data = np.loadtxt(label_path, dtype=np.float32).reshape(-1, 7)
 
         # Process each object in label file
-        for label in label_data:
-            frame_id, object_id, bbox, obj_id_orig = int(label[0]), int(label[1]), label[2:6], int(label[6])
-            x1, y1, x2, y2 = w * (bbox[0] - bbox[2] / 2), h * (bbox[1] - bbox[3] / 2), w * (bbox[0] + bbox[2] / 2), h * (bbox[1] + bbox[3] / 2)
-
-            # Load mask data
-            with open(mask_path, 'r') as f:
+        if osp.isfile(label_path):
+            # Load combined data (bbox + RLE mask)
+            with open(label_path, 'r') as f:
                 for line in f:
-                    parts = line.strip().split(',')
-                    m_fid, m_obj_id, m_h, m_w, rle_str = int(parts[0]), int(parts[1]), int(parts[2]), int(parts[3]), parts[4]
-                    # Check if the frame and object id from mask file match with label file
-                    if frame_id == m_fid and obj_id_orig == m_obj_id:
-                        # Decode mask from RLE
-                        mask = decode_RLE_to_mask(rle_str, m_h, m_w)
+                    parts = line.strip().split()
+                    print(parts)
+                    frame_id = parts[0] 
+                    object_id= int(parts[1]) 
+                    normalized_bbox = list(map(float, parts[2:6])) 
+                    rle_str = parts[6]
+                    cx, cy, bw, bh = normalized_bbox
+                    x1 = (cx - bw / 2) * w
+                    y1 = (cy - bh / 2) * h
+                    x2 = (cx + bw / 2) * w
+                    y2 = (cy + bh / 2) * h
 
-                        # Append data to targets
-                        targets['boxes'].append([x1, y1, x2, y2])
-                        targets['masks'].append(mask)
-                        targets['area'].append((x2 - x1) * (y2 - y1))
-                        targets['labels'].append(0)  
-                        targets['iscrowd'].append(0)
-                        obj_id = object_id + obj_idx_offset if object_id >= 0 else object_id
-                        targets['obj_ids'].append(obj_id)
-                        break  # Stop searching once a matching object is found
+
+                    # Decode RLE to mask
+                    mask = decode_RLE_to_mask(rle_str, int(h), int(w))
+
+                    # Append data to targets
+                    targets['boxes'].append([x1, y1, x2, y2])
+                    targets['masks'].append(mask)
+                    targets['area'].append((x2 - x1) * (y2 - y1))
+                    targets['labels'].append(0)  
+                    targets['iscrowd'].append(0)
+                    obj_id = object_id + obj_idx_offset if object_id >= 0 else object_id
+                    targets['obj_ids'].append(obj_id)
+                    
 
         # Convert lists to tensors
         targets['boxes'] = torch.as_tensor(targets['boxes'], dtype=torch.float32).reshape(-1, 4)
@@ -226,7 +232,7 @@ class DetMOTDetection:
         targets['obj_ids'] = torch.as_tensor(targets['obj_ids'])
         targets['masks'] = [torch.from_numpy(mask) for mask in targets['masks']]
         targets['masks'] = torch.stack(targets['masks'])
-        print(targets)
+        # print(targets)
         plot_frame_with_annotations(img, targets)
         return img, targets
 
