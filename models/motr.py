@@ -15,6 +15,7 @@ import copy
 import math
 import numpy as np
 import torch
+import cv2
 import torch.nn.functional as F
 from torch import nn, Tensor
 from typing import List
@@ -26,7 +27,7 @@ from util.misc import (NestedTensor, nested_tensor_from_tensor_list,
 
 from models.structures import Instances, Boxes, pairwise_iou, matched_boxlist_iou
 from .segmentation import (DETRsegm, PostProcessPanoptic, PostProcessSegm, MHAttentionMap, MaskHeadSmallConv,
-                           dice_loss, sigmoid_focal_loss, generalized_dice_loss, dual_focal_loss)
+                           dice_loss, sigmoid_focal_loss, focal_loss, generalized_dice_loss, dual_focal_loss)
 from .backbone import build_backbone
 from .matcher import build_matcher
 from .deformable_transformer_plus import build_deforamble_transformer
@@ -36,6 +37,8 @@ from .deformable_detr import SetCriterion, MLP
 from .segmentation import sigmoid_focal_loss
 import matplotlib.pyplot as plt
 import code
+from datetime import datetime
+import os
 
 class ClipMatcher(SetCriterion):
     def __init__(self, num_classes,
@@ -186,17 +189,28 @@ class ClipMatcher(SetCriterion):
     
     # (2) Adding loss_mask from deformable_detr to motr     
     def loss_masks(self, outputs, gt_instances: List[Instances], indices, num_boxes):
+        
+        def save_image(feature_map, layer_name):
+            image_path = "/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR-mask-AppleMots/output/pred_masks/loss_masks_py"
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            for i in range(feature_map.size(0)):
+                plt.imshow(feature_map[i, 0].detach().cpu().numpy(), cmap='gray')
+                plt.title(f"{layer_name}_{i}")
+                filename = f"{layer_name}_{i}_{timestamp}.png"
+                plt.savefig(os.path.join(image_path, filename))
+                plt.close()
+                
         """Compute the losses related to the masks: the focal loss and the dice loss.
             targets dicts must contain the key "masks" containing a tensor of dim [nb_target_boxes, h, w]
         """
         assert "pred_masks" in outputs
-        
         src_idx = self._get_src_permutation_idx(indices)
         tgt_idx = self._get_tgt_permutation_idx(indices)
         src_masks = outputs["pred_masks"].requires_grad_(True)
         # print('src_masks before:', src_masks.shape) #src_masks before: torch.Size([1, 300, 960, 1500])
         src_masks = src_masks[src_idx]
         # print('src_masks after:', src_masks.shape) # src_masks after: torch.Size([23, 960, 1500])
+        
         masks = []
         # print(gt_instances)
         for t in gt_instances:
@@ -211,8 +225,10 @@ class ClipMatcher(SetCriterion):
         tgt_mask_to_box = masks_to_boxes(target_masks)
         
         # upsample predictions to the target size
+        # print('src_masks in loss_masks:', src_masks.shape)
         src_masks = interpolate(src_masks[:, None], size=target_masks.shape[-2:],
-                                mode="bilinear", align_corners=False)
+                                mode="nearest")
+        save_image(src_masks, 'loss_masks')
         src_masks = src_masks[:, 0].flatten(1)
 
         target_masks = target_masks.flatten(1)
@@ -220,8 +236,9 @@ class ClipMatcher(SetCriterion):
         losses = {
             # "loss_mask": sigmoid_focal_loss(src_masks, target_masks, num_boxes),
             "loss_dice": dice_loss(src_masks, target_masks, num_boxes),
-            "loss_mask": dual_focal_loss(src_masks, target_masks, num_boxes),
+            # "loss_mask": dual_focal_loss(src_masks, target_masks, num_boxes),
             # "loss_dice": generalized_dice_loss(src_masks, target_masks, num_boxes),
+            # "loss_mask": focal_loss(src_masks, target_masks, num_boxes),
         }
         # print('losses masks are:', losses)
         return losses
@@ -666,12 +683,12 @@ class MOTR(nn.Module):
         memory_mask = memory_mask.view(bs, c, h, w)
         bbox_mask = self.bbox_attention(hs_mask[-1], memory_mask, mask=masks[1])
         seg_mask = self.mask_head(srcs[1], bbox_mask, [features[2].tensors, features[1].tensors, features[0].tensors])
-        pred_maskss = seg_mask.view(bs, outputs_coord[-1].shape[1], seg_mask.shape[-2], seg_mask.shape[-1])
+        pred_masks = seg_mask.view(bs, outputs_coord[-1].shape[1], seg_mask.shape[-2], seg_mask.shape[-1])
         
         # Resizing masks
-        max_h, max_w = samples.tensors.shape[-2], samples.tensors.shape[-1]
-        postprocessed_masks = F.interpolate(pred_maskss , size=(max_h, max_w), mode="nearest")
-        pred_masks = postprocessed_masks.to(torch.float32)
+        # max_h, max_w = samples.tensors.shape[-2], samples.tensors.shape[-1]
+        # postprocessed_masks = F.interpolate(pred_maskss , size=(max_h, max_w), mode="nearest")
+        # pred_masks = postprocessed_masks.to(torch.float32)
         
         # Adding pred_masks to out
         # print('outputs_class[-1] in motr has the shape of:', outputs_class[-1].shape)
@@ -694,7 +711,10 @@ class MOTR(nn.Module):
         track_instances.pred_boxes = frame_res['pred_boxes'][0]
         
         # (10) Adding pred_masks
-        track_instances.pred_masks = frame_res['pred_masks'][0]
+        pred_masks = frame_res['pred_masks'][0]
+        max_h, max_w = 972, 1296
+        pred_masks_interpolated = torch.nn.functional.interpolate(pred_masks.unsqueeze(0), size=(max_h, max_w), mode='nearest').squeeze(0)
+        track_instances.pred_masks = pred_masks_interpolated
         
 
         track_instances.output_embedding = frame_res['hs'][0]

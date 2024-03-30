@@ -70,6 +70,18 @@ class HungarianMatcher(nn.Module):
             For each batch element, it holds:
                 len(index_i) = len(index_j) = min(num_queries, num_target_boxes)
         """
+
+        def save_image(feature_map, layer_name):
+            image_path = "/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR-mask-AppleMots/output/pred_masks/matcher_py"
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            for i in range(feature_map.size(0)):
+                plt.imshow(feature_map[i, 0].detach().cpu().numpy(), cmap='gray')
+                plt.title(f"{layer_name}_{i}")
+                filename = f"{layer_name}_{i}_{timestamp}.png"
+                plt.savefig(os.path.join(image_path, filename))
+                plt.close()
+
+
         with torch.no_grad():
             bs, num_queries = outputs["pred_logits"].shape[:2]
 
@@ -119,10 +131,14 @@ class HungarianMatcher(nn.Module):
                     tgt_mask = torch.cat([gt_per_img.masks for gt_per_img in targets])
                 else:
                     tgt_mask = torch.cat([v['masks'] for v in targets]) 
-                
+                out_mask = interpolate(out_mask, size=tgt_mask.shape[-2:],
+                                mode="nearest")
+                save_image(out_mask, 'matcher')
+                out_mask = out_mask.flatten(0, 1)
+
                 num_boxes = sum(len(gt_per_img.boxes) for gt_per_img in targets) if isinstance(targets[0], Instances) else sum(len(v["boxes"]) for v in targets)
                 cost_mask = mask_iou_calculation (out_mask, tgt_mask)
-                print('cost_mask in matcher is:', cost_mask)
+                # print('cost_mask in matcher is:', cost_mask)
                 # C = (self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou)
                 C = (self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou + self.cost_mask * cost_mask)
                 C = C.view(bs, num_queries, -1).cpu()
