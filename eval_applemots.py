@@ -99,14 +99,76 @@ def plot_one_box(x, img, color=None, label=None, score=None, line_thickness=None
 
 
 # () Defining plot function for masks
-def plot_one_mask(mask, img, color=None, alpha=0.5):
-    color = color or [random.randint(0, 255) for _ in range(3)]
-    # Create a colored mask
-    color_mask = np.zeros((img.shape[0], img.shape[1], 4), dtype=np.uint8)
-    color_mask[mask > 0] = color   # Green with half transparency
+# def plot_one_mask(mask, img, color=None, alpha=0.5):
+#     # Create a copy of the image to keep the original unchanged
+#     img_with_mask = img.copy()
+    
+#     color = color or [random.randint(0, 255) for _ in range(3)] + [int(255 * alpha)]  # Adding alpha to color
 
-    # Combine the mask with the image
-    img = cv2.addWeighted(img, 1.0, color_mask, alpha, 0)
+#     # Create a mask with the color
+#     color_mask = np.zeros_like(img_with_mask, dtype=np.uint8)
+#     color_mask[mask > 0] = color  # Apply color where mask is positive
+
+#     # Combine the color mask with the image copy
+#     img_with_mask[mask > 0] = cv2.addWeighted(img_with_mask, 1.0 - alpha, color_mask, alpha, 0)[mask > 0]
+#     return img_with_mask
+
+def plot_one_mask(mask, img, color=None, alpha=0.5):
+    img_with_mask = img.copy()
+    
+    # If color is not specified, generate a random color
+    if color is None:
+        color = [random.randint(0, 255) for _ in range(3)]
+    
+    # else:
+    #     color = [color[:3]]
+    
+    # color = tuple(color)
+    # Generate color with alpha transparency
+    # color = color + [int(255 * alpha)]
+    
+    # if label is not None:
+    #     # Draw label text on the mask
+    #     cv2.putText(img_with_mask, label, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
+    #     if score is not None:
+    #         cv2.putText(img_with_mask, score, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
+
+
+    # Create a mask with the color
+    color_mask = np.zeros_like(img_with_mask, dtype=np.uint8)
+    color_mask[mask > 0] = color  # Apply color where mask is positive
+
+    # Combine the color mask with the image copy
+    img_with_mask[mask > 0] = cv2.addWeighted(img_with_mask, 1.0 - alpha, color_mask, alpha, 0)[mask > 0]
+
+    return img_with_mask
+
+def plot_detection(img, box, mask, color=None, label=None, score=None, line_thickness=2, alpha=0.5):
+    # If color is not specified, generate a random color
+    if color is None:
+        color = [random.randint(0, 255) for _ in range(3)]
+
+    # Draw bounding box
+    c1, c2 = (int(box[0]), int(box[1])), (int(box[2]), int(box[3]))
+    cv2.rectangle(img, c1, c2, color, thickness=line_thickness)
+
+    if label:
+        # Font thickness
+        tf = max(line_thickness - 1, 1)  
+        t_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_PLAIN, line_thickness / 3, thickness=tf)[0]
+        c2 = c1[0] + t_size[0], c1[1] - t_size[1] - 3
+        cv2.rectangle(img, c1, c2, color, -1)  # Filled rectangle for label background
+        cv2.putText(img, label, (c1[0], c1[1] - 2), cv2.FONT_HERSHEY_PLAIN, line_thickness / 3, [225, 255, 255], thickness=tf)
+
+        if score is not None:
+            cv2.putText(img, score, (c1[0], c1[1] + 30), cv2.FONT_HERSHEY_PLAIN, line_thickness / 3, [225, 255, 255], thickness=tf)
+
+        # Draw mask
+        img_with_mask = img.copy()
+        color_mask = np.zeros_like(img_with_mask, dtype=np.uint8)
+        color_mask[mask > 0] = color  # Apply color where mask is positive
+        img[mask > 0] = cv2.addWeighted(img_with_mask, 1.0 - alpha, color_mask, alpha, 0)[mask > 0]
+
     return img
 
 
@@ -121,13 +183,13 @@ def generate_unique_colors(identities):
     # Map each identity to a color
     colors = {identity: COLORS_10[identity % len(COLORS_10)] for identity in identities_int}
     return colors
+        
 
-
-
-def draw_bboxes(ori_img, bbox, identities=None, masks = None, offset=(0, 0), cvt_color=False, alpha = 0.5):
+def draw_bboxes(ori_img, masks, bbox, identities=None, offset=(0, 0), cvt_color=False, alpha = 0.1):
     if cvt_color:
         ori_img = cv2.cvtColor(np.asarray(ori_img), cv2.COLOR_RGB2BGR)
     img = ori_img
+    
     for i, box in enumerate(bbox):
         x1, y1, x2, y2 = [int(i) for i in box[:4]]
         x1 += offset[0]
@@ -139,16 +201,19 @@ def draw_bboxes(ori_img, bbox, identities=None, masks = None, offset=(0, 0), cvt
         else:
             score = None
         # box text and bar
+        # print('int(identities[i]):', identities)
         id = int(identities[i]) if identities is not None else 0
+        
         color = COLORS_10[id % len(COLORS_10)]
+        
         label = '{:d}'.format(id)
         # t_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_PLAIN, 2 , 2)[0]
-        img = plot_one_box([x1, y1, x2, y2], img, color, label, score=score)
+        # img = plot_one_box([x1, y1, x2, y2], img, color, label, score=score)
         
         # () Plot mask if available
-        if masks is not None and len(masks) > i:
-            mask = masks[i]
-            img = plot_one_mask(mask, img, color=color, alpha=alpha)
+        mask = masks[i]
+        # img = plot_one_mask(mask, img, color=color, alpha=alpha)
+        plot_detection(img, box, mask, color, label, score, line_thickness=2, alpha=0.1)
         
     return img
 
@@ -193,18 +258,39 @@ class MOTR(object):
 
     def update(self, dt_instances: Instances):
         ret = []
+        masks_ret = []
         for i in range(len(dt_instances)):
             label = dt_instances.labels[i]
             if label == 0:
                 id = dt_instances.obj_idxes[i]
                 box_with_score = np.concatenate([dt_instances.boxes[i], dt_instances.scores[i:i+1]], axis=-1)
                 ret.append(np.concatenate((box_with_score, [id + 1])).reshape(1, -1))  # +1 as MOT benchmark requires positive
+                
+                # Adding masks
+                masks_ret.append(dt_instances.masks[i])
 
         if len(ret) > 0:
-            return np.concatenate(ret)
-        return np.empty((0, 6))
+        #     return np.concatenate(ret)
+        # return np.empty((0, 6))
+            tracked_boxes = np.concatenate(ret)
+            # Combine tracked boxes with their masks into a structured output
+            tracking_results = {'boxes': tracked_boxes, 'masks': masks_ret}
+            return tracking_results
+
+        # If no valid detections, return an empty structure
+        return {'boxes': np.empty((0, 6)), 'masks': []}
 
 def encode_mask_to_RLE(binary_mask):
+    # fortran_binary_mask = np.asfortranarray(binary_mask)
+    # rle = mask_utils.encode(fortran_binary_mask)
+    # Convert to a NumPy array and ensure it's uint8
+    if isinstance(binary_mask, torch.Tensor):
+        # Convert to a NumPy array and ensure it's uint8
+        binary_mask = binary_mask.cpu().numpy().astype(np.uint8)
+    else:
+        # If it's already a NumPy array, just ensure it's the correct type
+        binary_mask = binary_mask.astype(np.uint8)
+    
     fortran_binary_mask = np.asfortranarray(binary_mask)
     rle = mask_utils.encode(fortran_binary_mask)
     return rle
@@ -217,6 +303,45 @@ def decode_RLE_to_mask(rle_str, h, w):
     mask = mask_utils.decode(rle)
     return mask
 
+# def load_label(label_path: str, mask_path: str, img_size: tuple) -> dict:
+#     targets = {'boxes': [], 'masks': [], 'area': [], 'labels': []}
+#     h, w = img_size  # Image dimensions
+
+#     if osp.isfile(label_path) and osp.isfile(mask_path):
+#         # Load label data
+#         label_data = np.loadtxt(label_path, dtype=np.float32).reshape(-1, 7)
+
+#         # Process each object in label file
+#         for label in label_data:
+            # frame_id, obj_id, bbox, obj_id_orig = int(label[0]), int(label[1]), label[2:6], int(label[6])
+            # x1, y1, x2, y2 = w * (bbox[0] - bbox[2] / 2), h * (bbox[1] - bbox[3] / 2), w * (bbox[0] + bbox[2] / 2), h * (bbox[1] + bbox[3] / 2)
+
+#             # Load mask data
+#             with open(mask_path, 'r') as f:
+#                 for line in f:
+#                     parts = line.strip().split(',')
+#                     m_fid, m_obj_id, m_h, m_w, rle_str = int(parts[0]), int(parts[1]), int(parts[2]), int(parts[3]), parts[4]
+#                     # Check if the frame and object id from mask file match with label file
+#                     if frame_id == m_fid and obj_id_orig == m_obj_id:
+#                         # Decode mask from RLE
+#                         mask = decode_RLE_to_mask(rle_str, m_h, m_w)
+
+#                         # Append data to targets
+#                         targets['boxes'].append([x1, y1, x2, y2])
+#                         targets['masks'].append(mask)
+#                         targets['area'].append((x2 - x1) * (y2 - y1))
+#                         targets['labels'].append(0)  # Assuming single class for simplicity
+#                         break  # Stop searching once a matching object is found
+
+#         # Convert lists to tensors
+#         targets['boxes'] = np.asarray(targets['boxes'], dtype=np.float32).reshape(-1, 4)
+#         targets['area'] = np.asarray(targets['area'], dtype=np.float32)
+#         targets['labels'] = np.asarray(targets['labels'], dtype=np.int64)
+#         targets['masks'] = np.stack([torch.from_numpy(np.array(m)) for m in targets['masks']])
+#     else:
+#         raise ValueError('Invalid path(s) provided.')
+
+#     return targets
 
 def load_label(combined_path: str, img_size: tuple) -> dict:
     targets = {'boxes': [], 'masks': [], 'area': [], 'labels': []}
@@ -227,7 +352,6 @@ def load_label(combined_path: str, img_size: tuple) -> dict:
         with open(combined_path, 'r') as f:
             for line in f:
                 parts = line.strip().split()
-                print(parts)
                 frame_id = parts[0] 
                 obj_id= parts[1] 
                 normalized_bbox = list(map(float, parts[2:6])) 
@@ -393,8 +517,8 @@ class Detector(object):
         # print('f_path:', f_path)
         img_size = (cur_img.shape[0], cur_img.shape[1])
         targets = load_label(label_path, img_size) 
-        print('targets[masks]:', targets['masks'].shape) # (number of masks, H, W)
-        visualize_annotations(cur_img, targets)
+        # print('targets[masks]:', targets['masks'].shape) # (number of masks, H, W)
+        # visualize_annotations(cur_img, targets)
         
         return cur_img, targets
 
@@ -425,15 +549,44 @@ class Detector(object):
 
     @staticmethod
     # () Adding mask rle for using MOTS eval tool
+    # def write_results(txt_path, frame_id, bbox_xyxy, identities):
+    #     save_format = '{frame},{id},{x1},{y1},{w},{h},1,-1,-1,-1\n'
+    #     with open(txt_path, 'a') as f:
+    #         for xyxy, track_id in zip(bbox_xyxy, identities):
+    #             if track_id < 0 or track_id is None:
+    #                 continue
+    #             x1, y1, x2, y2 = xyxy
+    #             w, h = x2 - x1, y2 - y1
+    #             line = save_format.format(frame=int(frame_id), id=int(track_id), x1=x1, y1=y1, w=w, h=h)
+    #             f.write(line)
+    
     def write_results(txt_path, frame_id, bbox_xyxy, identities, masks):
+        
+        def encode_mask_to_RLE_mots_compaible(binary_mask):
+            if isinstance(binary_mask, torch.Tensor):
+                # Convert to a NumPy array and ensure it's uint8
+                binary_mask = binary_mask.cpu().numpy().astype(np.uint8)
+            else:
+                # If it's already a NumPy array, just ensure it's the correct type
+                binary_mask = binary_mask.astype(np.uint8)
+            
+            fortran_binary_mask = np.asfortranarray(binary_mask)
+    
+            rle = mask_utils.encode(fortran_binary_mask)
+            return rle['counts'].decode('ascii') 
+        
         save_format = '{frame},{id},{x1},{y1},{w},{h},1,-1,-1,-1,{rle}\n'
+        # save_format = '{frame},{id},{x1},{y1},{w},{h},1,{rle}\n'
+        # save_format = '{frame},{id},1,{972}, {1296},{rle}\n'
         with open(txt_path, 'a') as f:
             for xyxy, track_id, mask in zip(bbox_xyxy, identities, masks):
                 if track_id < 0 or track_id is None:
                     continue
                 x1, y1, x2, y2 = xyxy
                 w, h = x2 - x1, y2 - y1
-                rle = encode_mask_to_RLE(mask)
+                rle = encode_mask_to_RLE_mots_compaible(mask)
+                # line = save_format.format(frame=int(frame_id), id=int(track_id), h=972 ,w=1296, rle=rle)
+                
                 line = save_format.format(frame=int(frame_id), id=int(track_id), x1=x1, y1=y1, w=w, h=h, rle=rle)
                 f.write(line)
                 
@@ -441,7 +594,7 @@ class Detector(object):
     def eval_seq(self):
         data_root = os.path.join(self.args.mot_path, 'APPLE_MOTS/train/images')
         # print("Self.predict_path is:", self.predict_path)
-        result_filename = os.path.join(self.predict_path, 'gt/gt.txt')
+        result_filename = os.path.join(self.predict_path, 'gt.txt')
         evaluator = Evaluator(data_root, self.seq_num)
         # print('result_filename is:', result_filename)
         accs = evaluator.eval_file(result_filename)
@@ -451,7 +604,7 @@ class Detector(object):
     def visualize_img_with_bbox(img_path, img, dt_instances: Instances, identities=None, ref_pts=None, gt_boxes=None):
         img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
         if dt_instances.has('scores'):
-            img_show = draw_bboxes(img, np.concatenate([dt_instances.boxes, dt_instances.scores.reshape(-1, 1)], axis=-1), dt_instances.masks, dt_instances.obj_idxes)
+            img_show = draw_bboxes(img, dt_instances.masks, np.concatenate([dt_instances.boxes, dt_instances.scores.reshape(-1, 1)], axis=-1), dt_instances.obj_idxes)
             
         else:
             img_show = draw_bboxes(img, dt_instances.boxes, dt_instances.obj_idxes, dt_instances.masks)
@@ -466,7 +619,7 @@ class Detector(object):
             img_show = draw_bboxes(img_show, gt_boxes, identities=np.ones((len(gt_boxes), )) * -1)
         cv2.imwrite(img_path, img_show)
 
-    def detect(self, prob_threshold=0.7, area_threshold=100, vis=False):
+    def detect(self, prob_threshold=0.7, area_threshold=100, vis=True):
         total_dts = 0
         track_instances = None
         max_id = 0
@@ -495,19 +648,19 @@ class Detector(object):
             # print('dt_instances:', dt_instances)
             total_dts += len(dt_instances)
 
-            # if vis:
-            #     # for visual
-            #     cur_vis_img_path = os.path.join(self.save_path, 'frame_{}.jpg'.format(i))
-            #     gt_boxes = None
-            #     self.visualize_img_with_bbox(cur_vis_img_path, ori_img, dt_instances, ref_pts=all_ref_pts, gt_boxes=gt_boxes)
+            if vis:
+                # for visual
+                cur_vis_img_path = os.path.join(self.save_path, 'frame_{}.jpg'.format(i))
+                gt_boxes = None
+                self.visualize_img_with_bbox(cur_vis_img_path, ori_img, dt_instances, ref_pts=all_ref_pts, gt_boxes=gt_boxes)
             
             tracker_outputs = self.tr_tracker.update(dt_instances)
-            print('tracker_output:', tracker_outputs)
+            # print('tracker_output:', tracker_outputs)
             self.write_results(txt_path=os.path.join(self.predict_path, 'gt.txt'),
                                frame_id=(i + 1),
-                               bbox_xyxy=tracker_outputs[:, :4],
-                               identities=tracker_outputs[:, 5],
-                               mask=tracker_outputs)
+                               bbox_xyxy=tracker_outputs['boxes'][:, :4],
+                               identities=tracker_outputs['boxes'][:, 5],
+                               masks=tracker_outputs['masks'])
         print("totally {} dts max_id={}".format(total_dts, max_id))
 
 
@@ -525,12 +678,12 @@ if __name__ == '__main__':
     detr = detr.cuda()
     detr.eval()
     # sub_dir = 'MOT17/images/train'
-    seq_nums = ['0000']
-                # '0001',
-                # '0002',
-                # '0003',
-                # '0004',
-                # '0005']
+    seq_nums = ['0000', 
+                '0001',
+                '0002',
+                '0003',
+                '0004',
+                '0005']
 
     # seq_nums = ['ADL-Rundle-6', 'ETH-Bahnhof', 'KITTI-13', 'PETS09-S2L1', 'TUD-Stadtmitte', 'ADL-Rundle-8', 'KITTI-17',
     #             'ETH-Pedcross2', 'ETH-Sunnyday', 'TUD-Campus', 'Venice-2']
