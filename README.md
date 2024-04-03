@@ -72,17 +72,9 @@ configs/ sbatch --j applemots_train_mask one_node_mask_MOTR_train.sh
 
 ```
 
-### Data transfer from home directory to Hipergator instruction
+### Data transfer instruction
 ```bash 
 configs/ rsync -ah --progress -e 'ssh -v -p 22' home_directory username:hipergator directory
-```
-
-### Data transfer from Hipergator to home directory instruction
-```bash 
 configs/ rsync -ah --progress -e 'ssh -p 22' username:/Hipergator directory /home directory
 ```
 
-### Running mots tool
-```bash 
-configs/ rsync -ah --progress -e 'ssh -p 22' username:/Hipergator directory /home directory
-```
