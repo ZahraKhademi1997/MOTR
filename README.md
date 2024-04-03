@@ -63,8 +63,9 @@ This document outlines the recent enhancements and modifications to the codebase
 - `main.py`:
 1. Adding AppleMOTS data path
 2. Adding args for masks in Loss coefficients
-3. Adding segmentation parameters in optimizer
-4. Adding learning rates and losses to tensorboard
+3. Adding args for masks in matcher coefficients
+4. Adding segmentation parameters in optimizer
+5. Adding learning rates to the optimizer
 
 ## Execution Command
 ```bash 
@@ -77,4 +78,3 @@ configs/ sbatch --j applemots_train_mask one_node_mask_MOTR_train.sh
 configs/ rsync -ah --progress -e 'ssh -v -p 22' home_directory username:hipergator directory
 configs/ rsync -ah --progress -e 'ssh -p 22' username:/Hipergator directory /home directory
 ```
-
