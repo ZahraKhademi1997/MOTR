@@ -200,6 +200,66 @@ class ClipMatcher(SetCriterion):
                 plt.savefig(os.path.join(image_path, filename))
                 plt.close()
                 
+        def save_mask_with_boxes(gt_instances, target_masks, indices, layer_name):
+            image_path = "/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR-mask-AppleMots/output/pred_masks/best_mask_boxes"
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            
+            idx = self._get_src_permutation_idx(indices)
+            src_boxes = outputs['pred_boxes'][idx]
+            _, box_ids = idx
+            height, width = target_masks[0].shape[-2:]  # Get the spatial dimensions from the first target mask
+            # Initialize a composite mask with the same height and width, and ensure it's on the same device and dtype
+            composite_mask = torch.zeros((height, width), dtype=torch.bool, device=target_masks[0].device)
+            for t in gt_instances:
+                masks_field = t.get('masks')  # Assuming this is already a tensor
+                # print('mask_fields:', masks_field.shape)
+                for object_mask in masks_field:
+                    object_mask_bool = object_mask.bool()  # Convert to boolean for logical operations
+                    composite_mask = composite_mask | object_mask_bool
+                    # print('composited_mask shape:', composite_mask.shape)
+            feature_map = composite_mask.float().unsqueeze(0)
+        
+            # Convert the tensor to a numpy array and squeeze in case there is an extra dimension
+            mask_np = feature_map.squeeze(0).detach().cpu().numpy()
+
+            fig, ax = plt.subplots(figsize=(12, 8))  # You can adjust the figure size as needed
+            ax.imshow(mask_np, cmap='gray')
+
+            img_height, img_width = mask_np.shape
+
+            for i, box in enumerate(src_boxes):
+                # Convert box coordinates from normalized to image pixel coordinates
+                # x1, y1, x2, y2 = box
+                # x1 = int(x1 * width)
+                # y1 = int(y1 * height)
+                # x2 = int(x2 * width)
+                # y2 = int(y2 * height)
+                
+                x_center, y_center, width, height = box
+                x_min = max(int((x_center - width / 2) * img_width), 0)
+                y_min = max(int((y_center - height / 2) * img_height), 0)
+                x_max = min(int((x_center + width / 2) * img_width), img_width - 1)
+                y_max = min(int((y_center + height / 2) * img_height), img_height - 1)
+                
+                # Extract the region of the best_pred_mask that the current src_box covers
+                region = mask_np[y_min:y_max+1, x_min:x_max+1]
+                
+                # Get the corresponding box ID
+                box_id = box_ids[i].item()
+
+                # Draw the rectangle on the image
+                rect = plt.Rectangle((x_min, y_min), x_max - x_min, y_max - y_min, linewidth=1, edgecolor='r', facecolor='none')
+                ax.add_patch(rect)
+
+                # Annotate the box with its ID
+                ax.text(x_min, y_min, str(box_id), verticalalignment='top', color='white', fontsize=8, weight='bold')
+            
+            plt.title(f"{layer_name}")
+            filename = f"{layer_name}_{timestamp}.png"
+            plt.savefig(os.path.join(image_path, filename))
+            plt.close()
+
+                
         """Compute the losses related to the masks: the focal loss and the dice loss.
             targets dicts must contain the key "masks" containing a tensor of dim [nb_target_boxes, h, w]
         """
@@ -220,7 +280,8 @@ class ClipMatcher(SetCriterion):
         target_masks, valid = nested_tensor_from_tensor_list(masks).decompose()
         target_masks = target_masks.to(src_masks)
         target_masks = target_masks[tgt_idx]
-        
+        size = target_masks.shape[-2:]
+        # save_mask_with_boxes(gt_instances, target_masks,indices,'gt_mask')
         out_mask_to_box = masks_to_boxes(src_masks)
         tgt_mask_to_box = masks_to_boxes(target_masks)
         
@@ -228,19 +289,19 @@ class ClipMatcher(SetCriterion):
         # print('src_masks in loss_masks:', src_masks.shape)
         src_masks = interpolate(src_masks[:, None], size=target_masks.shape[-2:],
                                 mode="nearest")
-        save_image(src_masks, 'loss_masks')
+        # save_image(src_masks, 'loss_masks')
         src_masks = src_masks[:, 0].flatten(1)
 
         target_masks = target_masks.flatten(1)
         target_masks = target_masks.view(src_masks.shape)
         losses = {
-            # "loss_mask": sigmoid_focal_loss(src_masks, target_masks, num_boxes),
-            "loss_dice": dice_loss(src_masks, target_masks, num_boxes),
+            # "loss_mask": focal_loss(src_masks, target_masks, size, num_boxes),
+            "loss_dice": dice_loss(src_masks, target_masks, size, num_boxes),
             # "loss_mask": dual_focal_loss(src_masks, target_masks, num_boxes),
             # "loss_dice": generalized_dice_loss(src_masks, target_masks, num_boxes),
             # "loss_mask": focal_loss(src_masks, target_masks, num_boxes),
         }
-        # print('losses masks are:', losses)
+        
         return losses
     
     
@@ -337,6 +398,7 @@ class ClipMatcher(SetCriterion):
         
         # (15) Adding active track masks
         active_track_masks = track_instances.pred_masks[active_idxes]
+        active_track_masks = active_track_masks.sigmoid()
         
         if len(active_track_boxes) > 0:
             gt_boxes = gt_instances_i.boxes[track_instances.matched_gt_idxes[active_idxes]]
@@ -346,11 +408,11 @@ class ClipMatcher(SetCriterion):
             # (17) Adding active track masks
             # track_instances.iou[active_idxes] = matched_boxlist_iou(Boxes(active_track_boxes), Boxes(gt_boxes))
             track_instances.iou_boxes[active_idxes] = matched_boxlist_iou(Boxes(active_track_boxes), Boxes(gt_boxes))
-            gt_masks = gt_instances_i.masks[track_instances.matched_gt_idxes[active_idxes]]
+            # gt_masks = gt_instances_i.masks[track_instances.matched_gt_idxes[active_idxes]]
             
-            gt_masks_to_boxes = box_ops.box_cxcywh_to_xyxy(masks_to_boxes(gt_masks.float())).to(active_track_masks.device)
-            active_track_masks_to_boxes = box_ops.box_cxcywh_to_xyxy(masks_to_boxes(active_track_masks)).to(active_track_masks.device)
-            track_instances.iou_masks[active_idxes] = matched_boxlist_iou(Boxes(active_track_masks_to_boxes), Boxes(gt_masks_to_boxes))
+            # gt_masks_to_boxes = box_ops.box_cxcywh_to_xyxy(masks_to_boxes(gt_masks.float())).to(active_track_masks.device)
+            # active_track_masks_to_boxes = box_ops.box_cxcywh_to_xyxy(masks_to_boxes(active_track_masks)).to(active_track_masks.device)
+            # track_instances.iou_masks[active_idxes] = matched_boxlist_iou(Boxes(active_track_masks_to_boxes), Boxes(gt_masks_to_boxes))
             
 
         # step7. merge the unmatched pairs and the matched pairs.

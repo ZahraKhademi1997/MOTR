@@ -202,7 +202,7 @@ def dice_loss(inputs, targets, size, num_boxes):
                 (0 for the negative class and 1 for the positive class).
     """
     eps = 1e-5
-    # inputs = inputs.sigmoid()
+    inputs = inputs.sigmoid()
     inputs_flat = inputs.flatten(1)
     targets_flat = targets.flatten(1)
     # numerator = 2 * (inputs * targets).sum(1)
