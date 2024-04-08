@@ -712,7 +712,7 @@ class MOTR(nn.Module):
                 pos.append(pos_l)
         
         # Feeding the features from the second layer of the backbone to transformer for mask
-        hs_mask,  init_reference_mask, inter_references_mask, enc_outputs_class_mask, enc_outputs_coord_unact_mask, memory_mask = self.transformer([srcs[1]], [masks[1]], [pos[1]],track_instances.query_pos, ref_pts=track_instances.ref_pts)
+        hs_mask,  init_reference_mask, inter_references_mask, enc_outputs_class_mask, enc_outputs_coord_unact_mask, memory_mask = self.transformer([srcs[3]], [masks[3]], [pos[3]],track_instances.query_pos, ref_pts=track_instances.ref_pts)
         # Feeding the features from all layers of the backbone to transformer for aux losses
         hs, init_reference, inter_references, enc_outputs_class, enc_outputs_coord_unact, memory= self.transformer(srcs, masks, pos, track_instances.query_pos, ref_pts=track_instances.ref_pts)
 
@@ -741,10 +741,10 @@ class MOTR(nn.Module):
         
         
         # Changing the memory shape to calculate masks
-        bs, c, h, w = srcs[1].shape
+        bs, c, h, w = srcs[3].shape
         memory_mask = memory_mask.view(bs, c, h, w)
-        bbox_mask = self.bbox_attention(hs_mask[-1], memory_mask, mask=masks[1])
-        seg_mask = self.mask_head(srcs[1], bbox_mask, [features[2].tensors, features[1].tensors, features[0].tensors])
+        bbox_mask = self.bbox_attention(mask[-1], memory_mask, mask=masks[3])
+        seg_mask = self.mask_head(srcs[3], bbox_mask, [features[2].tensors, features[1].tensors, features[0].tensors])
         pred_masks = seg_mask.view(bs, outputs_coord[-1].shape[1], seg_mask.shape[-2], seg_mask.shape[-1])
         
         # Resizing masks
@@ -815,6 +815,16 @@ class MOTR(nn.Module):
 
         track_instances = res['track_instances']
         track_instances = self.post_process(track_instances, ori_img_size)
+        
+        # Apply sigmoid to convert mask logits to probabilities
+        if hasattr(track_instances, 'pred_masks'):
+            mask_threshold = 0.5
+            mask_probs = track_instances.pred_masks.sigmoid()
+            
+            # Apply threshold to convert probabilities to binary masks
+            track_instances.pred_masks = (mask_probs > mask_threshold).float()
+        
+        
         ret = {'track_instances': track_instances}
         if 'ref_pts' in res:
             ref_pts = res['ref_pts']
