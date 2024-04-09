@@ -19,11 +19,9 @@ def compute_iou(mask1, mask2):
     # unique_values_mask2 = torch.unique(mask2)
     # print("Unique values in mask1:", unique_values_mask1)
     # print("Unique values in mask2:", unique_values_mask2)
-    
-    # intersection_sum = torch.sum(intersection).detach().cpu().numpy().astype(float)
-    # union_sum = torch.sum(union).detach().cpu().numpy().astype(float)
-    intersection_sum = torch.sum(intersection)
-    union_sum = torch.sum(union)
+
+    intersection_sum = torch.sum(intersection).to(mask1.device)
+    union_sum = torch.sum(union).to(mask1.device)
     
     # print('intersection has the type of:', intersection_sum.dtype)
     # print('union has the type of:', union_sum.dtype)
@@ -33,24 +31,19 @@ def compute_iou(mask1, mask2):
     #     print("Intersection or union is zero. Cannot calculate IoU.")
     #     return 0.0
 
-    iou = intersection_sum / union_sum
-    # print('iou in compute_iou is:', iou)
+    iou = (2 * intersection_sum / union_sum).to(mask1.device)
     return iou
 
 
 def mask_iou_calculation(pred_masks, gt_masks):
-    # pred_masks = [mask.to('cuda:0') for mask in pred_masks]
-    # gt_masks = [mask.to('cuda:0') for mask in gt_masks]
-    # print('gt_mask has the shape of:',gt_masks.shape)
-    # print('pred_mask has the shape of:',pred_masks.shape)
     num_pred_masks = len(pred_masks)
     num_gt_masks = len(gt_masks)
 
-    iou_matrix = torch.zeros(num_pred_masks, num_gt_masks)
+    iou_matrix = torch.zeros(num_pred_masks, num_gt_masks).to(pred_masks.device)
 
     for i in range(num_pred_masks):
         for j in range(num_gt_masks):
             iou = compute_iou(pred_masks[i], gt_masks[j])
-            iou_matrix[i, j] = 1 - iou
+            iou_matrix[i, j] = 1 - (iou)
             
     return iou_matrix
