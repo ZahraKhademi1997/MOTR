@@ -762,31 +762,153 @@ class MOTR(nn.Module):
         return out
     
     def _post_process_single_image(self, frame_res, track_instances, is_last):
+        
+        def map_boxes_to_masks(track_instances, img_size):
+                masks_test = track_instances.pred_masks
+                obj_idxes = track_instances.obj_idxes
+                pred_boxes = track_instances.pred_boxes
+                img_width, img_height = img_size
+                scores = []
+
+                # Calculate scores for each mask based on bbox overlap
+                for mask in masks_test:
+                    score = 0
+                    for i, obj_idx in enumerate(obj_idxes):
+                        if obj_idx != -1:  
+                            bbox = pred_boxes[i].detach().cpu().numpy()
+                            # Conversion formula provided by you
+                            x_center, y_center, width, height = bbox
+                            x_min = max(int((x_center - width / 2) * img_width), 0)
+                            y_min = max(int((y_center - height / 2) * img_height), 0)
+                            x_max = min(int((x_center + width / 2) * img_width), img_width - 1)
+                            y_max = min(int((y_center + height / 2) * img_height), img_height - 1)
+                            
+                            region = mask[y_min:y_max+1, x_min:x_max+1]
+                            score += torch.sum(region).item()
+                    scores.append(score)
+
+                best_mask_index = np.argmax(scores)
+                best_mask = masks_test[best_mask_index]
+
+                def visualize_mask_with_boxes(mask, boxes, obj_ids, img_size, output_dir):
+                    # Ensure output directory exists
+                    os.makedirs(output_dir, exist_ok=True)
+
+                    plt.figure(figsize=(10, 10))
+                    plt.imshow(mask.detach().cpu().numpy(), cmap='gray', interpolation='none')
+                    
+                    for box, obj_id in zip(boxes, obj_ids):
+                        if obj_id != -1:
+                            # Your bounding box conversion here...
+                            x_center, y_center, width, height = box.detach().cpu().numpy()
+                            x_min = max(int((x_center - width / 2) * img_size[0]), 0)
+                            y_min = max(int((y_center - height / 2) * img_size[1]), 0)
+                            x_max = min(int((x_center + width / 2) * img_size[0]), img_size[0] - 1)
+                            y_max = min(int((y_center + height / 2) * img_size[1]), img_size[1] - 1)
+
+                            rect = plt.Rectangle((x_min, y_min), x_max - x_min, y_max - y_min,
+                                                linewidth=1, edgecolor='r', facecolor='none')
+                            plt.gca().add_patch(rect)
+                            plt.gca().text(x_min, y_min, f'ID:{obj_id}', bbox=dict(facecolor='white', alpha=0.5))
+                    
+                    plt.axis('off')
+
+                    # Generate a unique identifier based on the current date and time
+                    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+                    filename = f'mask_with_boxes_{timestamp}.png'
+                    plt.savefig(os.path.join(output_dir, filename))
+                    plt.close()  # Close the figure to avoid memory issues
+                
+                # output_dir = '/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_test/output/test'
+                # visualize_mask_with_boxes(best_mask, pred_boxes, obj_idxes, img_size, output_dir)
+                return best_mask
+            
+            
+        def save_masks(final_masks_tensor, output_dir):
+                os.makedirs(output_dir, exist_ok=True)
+
+                # Loop through each mask in the tensor
+                for i, mask in enumerate(final_masks_tensor):
+                    # Convert the mask to a NumPy array
+                    mask_array = mask.detach().cpu().numpy()
+
+                    # Generate a unique filename for each mask
+                    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+                    filename = f'mask_{i}_{timestamp}.png'
+
+                    # Save the mask as an image
+                    plt.imsave(os.path.join(output_dir, filename), mask_array, cmap='gray')
+                
+                  
+        def extract_masks_with_ids(mask, track_instances, img_size):
+                final_masks = []
+                obj_ids = track_instances.obj_idxes
+                boxes = track_instances.pred_boxes
+                img_width, img_height = img_size
+
+                for box, obj_id in zip(boxes, obj_ids):
+                    if obj_id != -1:  # Ensure we have a valid object ID
+                        # Convert center coordinates to corner coordinates
+                        x_center, y_center, width, height = box.detach().cpu().numpy()
+                        x_min = max(int((x_center - width / 2) * img_width), 0)
+                        y_min = max(int((y_center - height / 2) * img_height), 0)
+                        x_max = min(int((x_center + width / 2) * img_width), img_width - 1)
+                        y_max = min(int((y_center + height / 2) * img_height), img_height - 1)
+
+                        # Extract the corresponding region from the mask
+                        region = mask[y_min:y_max, x_min:x_max]
+                        extracted_mask = torch.zeros_like(mask)
+                        extracted_mask[y_min:y_max, x_min:x_max] = region * obj_id
+                    else:
+                        # Create a zero mask for unmatched object IDs
+                        extracted_mask = torch.zeros_like(mask)    
+                    final_masks.append(extracted_mask)
+                            
+                # Convert the list of masks to a tensor if needed
+                final_masks_tensor = torch.stack(final_masks) if final_masks else None
+                return final_masks_tensor
+            
+                       
         with torch.no_grad():
             if self.training:
                 track_scores = frame_res['pred_logits'][0, :].sigmoid().max(dim=-1).values
             else:
                 track_scores = frame_res['pred_logits'][0, :, 0].sigmoid()
+            
+        pred_masks = frame_res['pred_masks'][0]
+        max_h, max_w = 972, 1296
+        pred_masks_interpolated = torch.nn.functional.interpolate(pred_masks.unsqueeze(0), size=(max_h, max_w), mode='nearest').squeeze(0)
 
+             
         track_instances.scores = track_scores
         track_instances.pred_logits = frame_res['pred_logits'][0]
         track_instances.pred_boxes = frame_res['pred_boxes'][0]
         
         # (10) Adding pred_masks
-        pred_masks = frame_res['pred_masks'][0]
-        max_h, max_w = 972, 1296
-        pred_masks_interpolated = torch.nn.functional.interpolate(pred_masks.unsqueeze(0), size=(max_h, max_w), mode='nearest').squeeze(0)
+        # track_instances.pred_masks = frame_res['pred_masks'][0]
         track_instances.pred_masks = pred_masks_interpolated
-        
-
         track_instances.output_embedding = frame_res['hs'][0]
         if self.training:
             # the track id will be assigned by the mather.
             frame_res['track_instances'] = track_instances
             track_instances = self.criterion.match_for_single_frame(frame_res)
+            
+            # This is a hack!
+            img_size = (1296, 972)  
+            best_mask = map_boxes_to_masks(track_instances, img_size)
+            final_masks_tensor = extract_masks_with_ids(best_mask, track_instances, img_size)
+            # save_masks(final_masks_tensor, '/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_test/output/individule_masks')
+            track_instances.pred_masks =  final_masks_tensor
+            
         else:
             # each track will be assigned an unique global id by the track base.
+            img_size = (1296, 972)  # Assuming this is the correct image size (width, height)
+            best_mask = map_boxes_to_masks(track_instances, img_size)
+            final_masks_tensor = extract_masks_with_ids(best_mask, track_instances, img_size)
+            track_instances.pred_masks = final_masks_tensor
+            
             self.track_base.update(track_instances)
+            
         if self.memory_bank is not None:
             track_instances = self.memory_bank(track_instances)
             # track_instances.track_scores = track_instances.track_scores[..., 0]
@@ -796,12 +918,16 @@ class MOTR(nn.Module):
         tmp = {}
         tmp['init_track_instances'] = self._generate_empty_tracks()
         tmp['track_instances'] = track_instances
+        
         if not is_last:
             out_track_instances = self.track_embed(tmp)
             frame_res['track_instances'] = out_track_instances
+            
         else:
+            
             frame_res['track_instances'] = None
         return frame_res
+
 
     @torch.no_grad()
     def inference_single_image(self, img, ori_img_size, track_instances=None):
