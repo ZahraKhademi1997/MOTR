@@ -122,8 +122,7 @@ class HungarianMatcher(nn.Module):
             cost_giou = -generalized_box_iou(box_cxcywh_to_xyxy(out_bbox),
                                              box_cxcywh_to_xyxy(tgt_bbox))
             
-            print('cost_bbox in matcher is:', cost_bbox)
-            print('cost_giou in matcher is:', cost_giou)
+            
             # (3) Adding out_mask
             if 'pred_masks' in outputs:
                 out_mask = outputs['pred_masks'].flatten(0, 1)  # [batch_size * num_queries, H, W]

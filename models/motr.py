@@ -879,7 +879,6 @@ class MOTR(nn.Module):
                     score = 0
                     for bbox in pred_boxes:
                         bbox = bbox.detach().cpu().numpy()
-                        # Conversion formula provided by you
                         x_center, y_center, width, height = bbox
                         x_min = max(int((x_center - width / 2) * img_width), 0)
                         y_min = max(int((y_center - height / 2) * img_height), 0)
