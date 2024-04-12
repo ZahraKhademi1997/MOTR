@@ -562,7 +562,25 @@ class Detector(object):
     
     def write_results(txt_path, frame_id, bbox_xyxy, identities, masks):
         
-        def encode_mask_to_RLE_mots_compaible(binary_mask):
+        # Function to save each mask with a corresponding object ID and frame ID
+        def save_mask_per_object(mask, object_ids, frame_id, save_path):
+            # Ensure the save directory exists
+            if not os.path.exists(save_path):
+                os.makedirs(save_path)
+            
+            # Save each mask as an image file
+            filename = f"mask_frame{frame_id}_id{object_ids}.png"
+            filepath = os.path.join(save_path, filename)
+            
+            # Convert the mask to numpy array if it's a tensor
+            if isinstance(mask, torch.Tensor):
+                mask = mask.cpu().numpy()
+            
+            # Use plt.imsave to save the mask array as an image file
+            plt.imsave(filepath, mask, cmap='gray')
+
+        
+        def encode_mask_to_RLE_results(binary_mask):
             if isinstance(binary_mask, torch.Tensor):
                 # Convert to a NumPy array and ensure it's uint8
                 binary_mask = binary_mask.cpu().numpy().astype(np.uint8)
@@ -571,24 +589,24 @@ class Detector(object):
                 binary_mask = binary_mask.astype(np.uint8)
             
             fortran_binary_mask = np.asfortranarray(binary_mask)
-    
             rle = mask_utils.encode(fortran_binary_mask)
-            return rle['counts'].decode('ascii') 
+            return rle['counts'].decode('ascii')
         
-        save_format = '{frame},{id},{x1},{y1},{w},{h},1,-1,-1,-1,{rle}\n'
-        # save_format = '{frame},{id},{x1},{y1},{w},{h},1,{rle}\n'
-        # save_format = '{frame},{id},1,{972}, {1296},{rle}\n'
         with open(txt_path, 'a') as f:
-            for xyxy, track_id, mask in zip(bbox_xyxy, identities, masks):
-                if track_id < 0 or track_id is None:
+            for i, (xyxy, track_id) in enumerate(zip(bbox_xyxy, identities)):
+                if track_id < 0:
                     continue
-                x1, y1, x2, y2 = xyxy
-                w, h = x2 - x1, y2 - y1
-                rle = encode_mask_to_RLE_mots_compaible(mask)
-                # line = save_format.format(frame=int(frame_id), id=int(track_id), h=972 ,w=1296, rle=rle)
                 
-                line = save_format.format(frame=int(frame_id), id=int(track_id), x1=x1, y1=y1, w=w, h=h, rle=rle)
-                f.write(line)
+                track_id = int(track_id)
+                masks_height = masks[i].shape[0]
+                masks_width = masks[i].shape[1]
+                mask = (masks[i].sigmoid()) > 0.75
+                
+                # save_mask_per_object(masks[i], track_id, i, '/home/zahra/Documents/Projects/prototype/MOTR-codes/test_mask/MOTR-MOTR_version2_mask_applemots/output/mask_before_rle')
+                rle = encode_mask_to_RLE_results(mask)
+                
+                class_id = 1
+                f.write(f'{frame_id},{track_id},{class_id},{masks_height},{masks_width},{rle}\n')
                 
 
     def eval_seq(self):
