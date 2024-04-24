@@ -29,7 +29,7 @@ import datasets.samplers as samplers
 from datasets import build_dataset, get_coco_api_from_dataset
 from engine import evaluate, train_one_epoch, train_one_epoch_mot
 from models import build_model
-
+from torch.utils.tensorboard import SummaryWriter
 
 def get_args_parser():
     parser = argparse.ArgumentParser('Deformable DETR Detector', add_help=False)
@@ -38,6 +38,60 @@ def get_args_parser():
     parser.add_argument('--lr_backbone', default=2e-5, type=float)
     parser.add_argument('--lr_linear_proj_names', default=['reference_points', 'sampling_offsets',], type=str, nargs='+')
     parser.add_argument('--lr_linear_proj_mult', default=0.1, type=float)
+    
+    # Adding segmentation lr
+    # parser.add_argument('--lr_segmentation_bbox_attention_names', default=["bbox_attention", "mask_head"], type=str, nargs='+')
+    # parser.add_argument('--lr_segmentation_head', default=1e-4, type=float) # This value with SGD will prevent vanishing gradient descent but still the bbox_attention gradients are too small
+    
+    # parser.add_argument('--lr_segmentation_bbox_attention_names', default=["bbox_attention"], type=str, nargs='+')
+    # parser.add_argument('--lr_segmentation_bbox_attention', default=2e-4, type=float)
+    
+    # parser.add_argument('--lr_segmentation_mask_head_names', default=["mask_head"], type=str, nargs='+')
+    # parser.add_argument('--lr_segmentation_mask_head', default=2e-4, type=float)
+
+    parser.add_argument('--lr_segmentation_bbox_attention_k_linear_names', default=["bbox_attention.k_linear"], type=str, nargs='+')
+    parser.add_argument('--lr_segmentation_bbox_attention_k_linear', default=2e-4, type=float)
+    parser.add_argument('--lr_segmentation_bbox_attention_q_linear_names', default=["bbox_attention.q_linear"], type=str, nargs='+')
+    parser.add_argument('--lr_segmentation_bbox_attention_q_linear', default=2e-4, type=float)
+
+    parser.add_argument('--lr_segmentation_mask_head_lay1_names', default=["mask_head.lay1"], type=str, nargs='+')
+    parser.add_argument('--lr_segmentation_mask_head_lay1', default=2e-4, type=float)
+    parser.add_argument('--lr_segmentation_mask_head_gn1_names', default=["mask_head.gn1"], type=str, nargs='+')
+    parser.add_argument('--lr_segmentation_mask_head_gn1', default=2e-4, type=float)
+
+    parser.add_argument('--lr_segmentation_mask_head_lay2_names', default=["mask_head.lay2"], type=str, nargs='+')
+    parser.add_argument('--lr_segmentation_mask_head_lay2', default=2e-4, type=float)
+    parser.add_argument('--lr_segmentation_mask_head_gn2_names', default=["mask_head.gn2"], type=str, nargs='+')
+    parser.add_argument('--lr_segmentation_mask_head_gn2', default=2e-4, type=float)
+
+    parser.add_argument('--lr_segmentation_mask_head_lay3_names', default=["mask_head.lay3"], type=str, nargs='+')
+    parser.add_argument('--lr_segmentation_mask_head_lay3', default=2e-4, type=float)
+    parser.add_argument('--lr_segmentation_mask_head_gn3_names', default=["mask_head.gn3"], type=str, nargs='+')
+    parser.add_argument('--lr_segmentation_mask_head_gn3', default=2e-4, type=float)
+
+    parser.add_argument('--lr_segmentation_mask_head_lay4_names', default=["mask_head.lay4"], type=str, nargs='+')
+    parser.add_argument('--lr_segmentation_mask_head_lay4', default=2e-4, type=float)
+    parser.add_argument('--lr_segmentation_mask_head_gn4_names', default=["mask_head.gn4"], type=str, nargs='+')
+    parser.add_argument('--lr_segmentation_mask_head_gn4', default=2e-4, type=float)
+
+    parser.add_argument('--lr_segmentation_mask_head_lay5_names', default=["mask_head.lay5"], type=str, nargs='+')
+    parser.add_argument('--lr_segmentation_mask_head_lay5', default=2e-4, type=float)
+    parser.add_argument('--lr_segmentation_mask_head_gn5_names', default=["mask_head.gn5"], type=str, nargs='+')
+    parser.add_argument('--lr_segmentation_mask_head_gn5', default=2e-4, type=float)
+
+    parser.add_argument('--lr_segmentation_mask_head_out_lay_names', default=["mask_head.out_lay"], type=str, nargs='+')
+    parser.add_argument('--lr_segmentation_mask_head_out_lay', default=2e-4, type=float)
+
+    parser.add_argument('--lr_segmentation_mask_head_adapter1_names', default=["mask_head.adapter1"], type=str, nargs='+')
+    parser.add_argument('--lr_segmentation_mask_head_adapter1', default=2e-4, type=float)
+
+    parser.add_argument('--lr_segmentation_mask_head_adapter2_names', default=["mask_head.adapter2"], type=str, nargs='+')
+    parser.add_argument('--lr_segmentation_mask_head_adapter2', default=2e-4, type=float)
+
+    parser.add_argument('--lr_segmentation_mask_head_adapter3_names', default=["mask_head.adapter3"], type=str, nargs='+')
+    parser.add_argument('--lr_segmentation_mask_head_adapter3', default=2e-4, type=float)
+    
+    
     parser.add_argument('--batch_size', default=2, type=int)
     parser.add_argument('--weight_decay', default=1e-4, type=float)
     parser.add_argument('--epochs', default=50, type=int)
@@ -117,14 +171,20 @@ def get_args_parser():
                         help="L1 box coefficient in the matching cost")
     parser.add_argument('--set_cost_giou', default=2, type=float,
                         help="giou box coefficient in the matching cost")
+    parser.add_argument('--set_cost_mask', default=2, type=float,
+                        help="Mask IOU loss coefficient in the matching cost")
 
     # * Loss coefficients
-    parser.add_argument('--mask_loss_coef', default=1, type=float)
-    parser.add_argument('--dice_loss_coef', default=1, type=float)
     parser.add_argument('--cls_loss_coef', default=2, type=float)
     parser.add_argument('--bbox_loss_coef', default=5, type=float)
     parser.add_argument('--giou_loss_coef', default=2, type=float)
     parser.add_argument('--focal_alpha', default=0.25, type=float)
+    
+    # Adding masks loss coef
+    parser.add_argument('--mask_loss_coef', default=5, type=float)
+    parser.add_argument('--dice_loss_coef', default=5, type=float)
+    parser.add_argument('--cost_giou_mask_to_box_coef', default=2, type=float)
+    
 
     # dataset parameters
     parser.add_argument('--dataset_file', default='coco')
@@ -151,12 +211,20 @@ def get_args_parser():
     # end-to-end mot settings.
     parser.add_argument('--mot_path', default='/data/Dataset/mot', type=str)
     parser.add_argument('--input_video', default='figs/demo.mp4', type=str)
+    # parser.add_argument('--data_txt_path_train',
+    #                     default='./datasets/data_path/detmot17.train', type=str,
+    #                     help="path to dataset txt split")
+    # parser.add_argument('--data_txt_path_val',
+    #                     default='./datasets/data_path/detmot17.train', type=str,
+    #                     help="path to dataset txt split")
+    
     parser.add_argument('--data_txt_path_train',
-                        default='./datasets/data_path/detmot17.train', type=str,
+                        default='./datasets/data_path/applemots.train', type=str,
                         help="path to dataset txt split")
     parser.add_argument('--data_txt_path_val',
-                        default='./datasets/data_path/detmot17.train', type=str,
+                        default='./datasets/data_path/applemots.val', type=str,
                         help="path to dataset txt split")
+    
     parser.add_argument('--img_path', default='data/valid/JPEGImages/')
 
     parser.add_argument('--query_interaction_layer', default='QIM', type=str,
@@ -238,22 +306,193 @@ def main(args):
                 break
         return out
 
+    # Adding segmentation parameters in optimizer
     param_dicts = [
         {
             "params":
                 [p for n, p in model_without_ddp.named_parameters()
-                 if not match_name_keywords(n, args.lr_backbone_names) and not match_name_keywords(n, args.lr_linear_proj_names) and p.requires_grad],
+                 if not match_name_keywords(n, args.lr_backbone_names) 
+                 and not match_name_keywords(n, args.lr_linear_proj_names) 
+                 #############################################################
+                 # () Adding different learning rate for the segmentation head
+                 #  and not match_name_keywords(n, args.lr_segmentation_head_names)
+                 and not match_name_keywords(n, args.lr_segmentation_bbox_attention_q_linear_names)
+                 and not match_name_keywords(n, args.lr_segmentation_bbox_attention_k_linear_names)
+                #  and not match_name_keywords(n, args.lr_segmentation_mask_head_names)
+                 and not match_name_keywords(n, args.lr_segmentation_mask_head_lay1_names)
+                 and not match_name_keywords(n, args.lr_segmentation_mask_head_gn1_names)
+                 and not match_name_keywords(n, args.lr_segmentation_mask_head_lay2_names)
+                 and not match_name_keywords(n, args.lr_segmentation_mask_head_gn2_names)
+                 and not match_name_keywords(n, args.lr_segmentation_mask_head_lay3_names)
+                 and not match_name_keywords(n, args.lr_segmentation_mask_head_gn3_names)
+                 and not match_name_keywords(n, args.lr_segmentation_mask_head_lay4_names)
+                 and not match_name_keywords(n, args.lr_segmentation_mask_head_gn4_names)
+                 and not match_name_keywords(n, args.lr_segmentation_mask_head_lay5_names)
+                 and not match_name_keywords(n, args.lr_segmentation_mask_head_gn5_names)
+                 and not match_name_keywords(n, args.lr_segmentation_mask_head_out_lay_names)
+                 and not match_name_keywords(n, args.lr_segmentation_mask_head_adapter1_names)
+                 and not match_name_keywords(n, args.lr_segmentation_mask_head_adapter2_names)
+                 and not match_name_keywords(n, args.lr_segmentation_mask_head_adapter3_names)
+                 #############################################################
+                 and p.requires_grad],
             "lr": args.lr,
+            # "weight_decay": args.main_weight_decay,
         },
         {
-            "params": [p for n, p in model_without_ddp.named_parameters() if match_name_keywords(n, args.lr_backbone_names) and p.requires_grad],
+            "params": [p for n, p in model_without_ddp.named_parameters() 
+                       if match_name_keywords(n, args.lr_backbone_names) and p.requires_grad],
             "lr": args.lr_backbone,
+            # "weight_decay": args.backbone_weight_decay,
         },
         {
-            "params": [p for n, p in model_without_ddp.named_parameters() if match_name_keywords(n, args.lr_linear_proj_names) and p.requires_grad],
+            "params": [p for n, p in model_without_ddp.named_parameters() 
+                       if match_name_keywords(n, args.lr_linear_proj_names) and p.requires_grad],
             "lr": args.lr * args.lr_linear_proj_mult,
-        }
+            # "weight_decay": args.linear_proj_mult_weight_decay,
+        },
+        #############################################################################################
+        # () Adding new learning rate for the segmentation head
+        # {
+        #     "params": [
+        #         p for n, p in model_without_ddp.named_parameters()
+        #         if match_name_keywords(n, args.lr_segmentation_head_names) and p.requires_grad
+        #     ],
+        #     "lr": args.lr_segmentation_head, 
+        # },
+        {
+            "params": [
+                p for n, p in model_without_ddp.named_parameters()
+                if match_name_keywords(n, args.lr_segmentation_bbox_attention_q_linear_names) and p.requires_grad
+            ],
+            "lr": args.lr_segmentation_bbox_attention_q_linear, 
+            # "weight_decay": args.bbox_attention_weight_decay,
+        },
+        {
+            "params": [
+                p for n, p in model_without_ddp.named_parameters()
+                if match_name_keywords(n, args.lr_segmentation_bbox_attention_k_linear_names) and p.requires_grad
+            ],
+            "lr": args.lr_segmentation_bbox_attention_k_linear, 
+            # "weight_decay": args.bbox_attention_weight_decay,
+        },
+        {
+            "params": [
+                p for n, p in model_without_ddp.named_parameters()
+                if match_name_keywords(n, args.lr_segmentation_mask_head_lay1_names) and p.requires_grad
+            ],
+            "lr": args.lr_segmentation_mask_head_lay1,
+            # "weight_decay": args.mask_head_weight_decay, 
+        },
+        {
+            "params": [
+                p for n, p in model_without_ddp.named_parameters()
+                if match_name_keywords(n, args.lr_segmentation_mask_head_gn1_names) and p.requires_grad
+            ],
+            "lr": args.lr_segmentation_mask_head_gn1,
+            # "weight_decay": args.mask_head_weight_decay, 
+        },
+        {
+            "params": [
+                p for n, p in model_without_ddp.named_parameters()
+                if match_name_keywords(n, args.lr_segmentation_mask_head_lay2_names) and p.requires_grad
+            ],
+            "lr": args.lr_segmentation_mask_head_lay2,
+            # "weight_decay": args.mask_head_weight_decay, 
+        },
+        {
+            "params": [
+                p for n, p in model_without_ddp.named_parameters()
+                if match_name_keywords(n, args.lr_segmentation_mask_head_gn2_names) and p.requires_grad
+            ],
+            "lr": args.lr_segmentation_mask_head_gn2,
+            # "weight_decay": args.mask_head_weight_decay, 
+        },
+        {
+            "params": [
+                p for n, p in model_without_ddp.named_parameters()
+                if match_name_keywords(n, args.lr_segmentation_mask_head_lay3_names) and p.requires_grad
+            ],
+            "lr": args.lr_segmentation_mask_head_lay3,
+            # "weight_decay": args.mask_head_weight_decay, 
+        },
+        {
+            "params": [
+                p for n, p in model_without_ddp.named_parameters()
+                if match_name_keywords(n, args.lr_segmentation_mask_head_gn3_names) and p.requires_grad
+            ],
+            "lr": args.lr_segmentation_mask_head_gn3,
+            # "weight_decay": args.mask_head_weight_decay, 
+        },
+        {
+            "params": [
+                p for n, p in model_without_ddp.named_parameters()
+                if match_name_keywords(n, args.lr_segmentation_mask_head_lay4_names) and p.requires_grad
+            ],
+            "lr": args.lr_segmentation_mask_head_lay4,
+            # "weight_decay": args.mask_head_weight_decay, 
+        },
+        {
+            "params": [
+                p for n, p in model_without_ddp.named_parameters()
+                if match_name_keywords(n, args.lr_segmentation_mask_head_gn4_names) and p.requires_grad
+            ],
+            "lr": args.lr_segmentation_mask_head_gn4,
+            # "weight_decay": args.mask_head_weight_decay, 
+        },
+        {
+            "params": [
+                p for n, p in model_without_ddp.named_parameters()
+                if match_name_keywords(n, args.lr_segmentation_mask_head_lay5_names) and p.requires_grad
+            ],
+            "lr": args.lr_segmentation_mask_head_lay5,
+            # "weight_decay": args.mask_head_weight_decay, 
+        },
+        {
+            "params": [
+                p for n, p in model_without_ddp.named_parameters()
+                if match_name_keywords(n, args.lr_segmentation_mask_head_gn5_names) and p.requires_grad
+            ],
+            "lr": args.lr_segmentation_mask_head_gn5,
+            # "weight_decay": args.mask_head_weight_decay, 
+        },
+
+        {
+            "params": [
+                p for n, p in model_without_ddp.named_parameters()
+                if match_name_keywords(n, args.lr_segmentation_mask_head_out_lay_names) and p.requires_grad
+            ],
+            "lr": args.lr_segmentation_mask_head_out_lay,
+            # "weight_decay": args.mask_head_weight_decay, 
+        },
+        {
+            "params": [
+                p for n, p in model_without_ddp.named_parameters()
+                if match_name_keywords(n, args.lr_segmentation_mask_head_adapter1_names) and p.requires_grad
+            ],
+            "lr": args.lr_segmentation_mask_head_adapter1,
+            # "weight_decay": args.mask_head_weight_decay, 
+        },
+        {
+            "params": [
+                p for n, p in model_without_ddp.named_parameters()
+                if match_name_keywords(n, args.lr_segmentation_mask_head_adapter2_names) and p.requires_grad
+            ],
+            "lr": args.lr_segmentation_mask_head_adapter2,
+            # "weight_decay": args.mask_head_weight_decay, 
+        },
+        {
+            "params": [
+                p for n, p in model_without_ddp.named_parameters()
+                if match_name_keywords(n, args.lr_segmentation_mask_head_adapter3_names) and p.requires_grad
+            ],
+            "lr": args.lr_segmentation_mask_head_adapter3,
+            # "weight_decay": args.mask_head_weight_decay, 
+        },
+        
+        #############################################################################################
     ]
+    
+    
     if args.sgd:
         optimizer = torch.optim.SGD(param_dicts, lr=args.lr, momentum=0.9,
                                     weight_decay=args.weight_decay)
@@ -331,6 +570,12 @@ def main(args):
             sampler_train.set_epoch(epoch)
         train_stats = train_func(
             model, criterion, data_loader_train, optimizer, device, epoch, args.clip_max_norm)
+        
+        # Logging
+        for key, value in train_stats.items():
+            writer.add_scalar(f'Training/{key}', value, epoch)
+            
+            
         lr_scheduler.step()
         if args.output_dir:
             checkpoint_paths = [output_dir / 'checkpoint.pth']
@@ -350,6 +595,11 @@ def main(args):
             test_stats, coco_evaluator = evaluate(
                 model, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir
             )
+            
+            # Log validation metrics
+            for key, value in test_stats.items():
+               writer.add_scalar(f'Validation/{key}', value, epoch)
+               
 
             log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
                          **{f'test_{k}': v for k, v in test_stats.items()},
@@ -373,6 +623,15 @@ def main(args):
         if args.dataset_file in ['e2e_mot', 'e2e_dance', 'mot', 'ori_mot', 'e2e_static_mot', 'e2e_joint']:
             dataset_train.step_epoch()
             dataset_val.step_epoch()
+            
+           
+        # Log learning rate
+        for i, group in enumerate(optimizer.param_groups):
+            writer.add_scalar(f'Learning_Rate/group_{i}', group['lr'], epoch)
+          
+        writer.close()
+         
+        
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print('Training time {}'.format(total_time_str))

@@ -51,7 +51,7 @@ class DETRsegm(nn.Module):
 
         src, mask = features[-1].decompose()
         src_proj = self.detr.input_proj(src)
-        hs, memory = self.detr.transformer(src_proj, mask, self.detr.query_embed.weight, pos[-1])
+        hs, memory = self.detr.transformer(src_proj, mask, self.detr.query_embed.weight, pos[-1]) # query and key
 
         outputs_class = self.detr.class_embed(hs)
         outputs_coord = self.detr.bbox_embed(hs).sigmoid()
@@ -92,6 +92,7 @@ class MaskHeadSmallConv(nn.Module):
         self.lay5 = torch.nn.Conv2d(inter_dims[3], inter_dims[4], 3, padding=1)
         self.gn5 = torch.nn.GroupNorm(8, inter_dims[4])
         self.out_lay = torch.nn.Conv2d(inter_dims[4], 1, 3, padding=1)
+        # self.out_lay = torch.nn.Conv2d(inter_dims[4], 1, 1, padding=1)
 
         self.dim = dim
 
@@ -105,6 +106,17 @@ class MaskHeadSmallConv(nn.Module):
                 nn.init.constant_(m.bias, 0)
 
     def forward(self, x, bbox_mask, fpns):
+        
+        def save_image(feature_map, layer_name):
+            image_path = "/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR-mask-AppleMots/output/mask_segmentation_py"
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            for i in range(feature_map.size(0)):
+                plt.imshow(feature_map[i, 0].detach().cpu().numpy(), cmap='gray')
+                plt.title(f"{layer_name}_{i}")
+                filename = f"{layer_name}_{i}_{timestamp}.png"
+                plt.savefig(os.path.join(image_path, filename))
+                plt.close()
+                
         def expand(tensor, length):
             return tensor.unsqueeze(1).repeat(1, int(length), 1, 1, 1).flatten(0, 1)
 
@@ -142,6 +154,8 @@ class MaskHeadSmallConv(nn.Module):
         x = F.relu(x)
 
         x = self.out_lay(x)
+        x = F.relu(x)
+        # save_image(x, 'out_lay')
         return x
 
 
@@ -177,7 +191,7 @@ class MHAttentionMap(nn.Module):
         return weights
 
 
-def dice_loss(inputs, targets, num_boxes):
+def dice_loss(inputs, targets, size, num_boxes):
     """
     Compute the DICE loss, similar to generalized IOU for masks
     Args:
@@ -187,12 +201,70 @@ def dice_loss(inputs, targets, num_boxes):
                  classification label for each element in inputs
                 (0 for the negative class and 1 for the positive class).
     """
+    eps = 1e-5
     inputs = inputs.sigmoid()
-    inputs = inputs.flatten(1)
-    numerator = 2 * (inputs * targets).sum(1)
-    denominator = inputs.sum(-1) + targets.sum(-1)
-    loss = 1 - (numerator + 1) / (denominator + 1)
+    inputs_flat = inputs.flatten(1)
+    targets_flat = targets.flatten(1)
+    # numerator = 2 * (inputs * targets).sum(1)
+    # denominator = inputs.sum(-1) + targets.sum(-1)
+    # loss = 1 - (numerator + 1) / (denominator + 1)
+    
+    intersection = (inputs_flat * targets_flat).sum(dim=1)
+    union = (inputs_flat ** 2.0).sum(dim=1) + (targets_flat ** 2.0).sum(dim=1) + eps
+    loss = 1. - (2 * intersection / union)
+
+    # print('inputs:', inputs.shape)
+    # print('targets:', targets.shape)
+    original_h, original_w = size
+    # # Convert tensors to numpy arrays
+    output_dir = "/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR-mask-AppleMots/output/pred_masks/dice_loss_py"
+    inputs_reshaped = inputs.view(-1, original_h, original_w)
+    targets_reshaped = targets.view(-1, original_h, original_w)
+
+    # Create the directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Loop through the batch and save images
+    for i in range(inputs_reshaped.shape[0]):
+        if i == 1:
+            fig, ax = plt.subplots(1, 2, figsize=(12, 6))
+            ax[0].imshow(inputs_reshaped[i].detach().cpu(), cmap='gray')
+            ax[0].set_title('Predicted Mask')
+            ax[0].axis('off')
+
+            ax[1].imshow(targets_reshaped[i].detach().cpu(), cmap='gray')
+            ax[1].set_title('Ground Truth Mask')
+            ax[1].axis('off')
+
+            # Use datetime to generate a unique identifier for this particular batch and epoch
+            timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            filename = f"mask_comparison_ep_idx{i}_{timestamp}.png"
+            plt.savefig(os.path.join(output_dir, filename))
+            plt.close()
+
     return loss.sum() / num_boxes
+
+def generalized_dice_loss(inputs, targets, num_boxes):
+    inputs = inputs.sigmoid().flatten(1)
+    targets = targets.flatten(1)
+
+    # Calculate pixel frequency for each class (assuming binary classification for simplicity)
+    pixel_freq = targets.sum(dim=0)
+
+    # Calculate class weights inversely proportional to the square of pixel frequencies
+    class_weights = 1 / (pixel_freq**2 + 1e-6)
+    class_weights /= class_weights.sum()  # Normalize class weights
+
+    # Apply class weights
+    weighted_numerator = 2 * (inputs * targets).sum(dim=1) * class_weights[1]  # Assuming class 1 is the class of interest
+    weighted_denominator = (inputs + targets).sum(dim=1) * class_weights[1]  # Apply weights to both inputs and targets
+
+    # Calculate Generalized Dice Loss
+    dice_loss = 1 - (weighted_numerator + 1e-6) / (weighted_denominator + 1e-6)
+    
+    # Normalize by num_boxes
+    return dice_loss.sum() / num_boxes
+
 
 
 def sigmoid_focal_loss(inputs, targets, num_boxes, alpha: float = 0.25, gamma: float = 2, mean_in_dim1=True):
@@ -224,27 +296,54 @@ def sigmoid_focal_loss(inputs, targets, num_boxes, alpha: float = 0.25, gamma: f
     else:
         return loss.sum() / num_boxes
 
+def dual_focal_loss(predicted_masks, gt_mask, num_boxes, a=0.5, b=0.75, q=1.25):
+    """
+    Compute the Dual Focal Loss between the predicted masks and ground truth masks.
 
+    Parameters:
+    - predicted_masks: Tensor of predicted masks with values between -1 and 1.
+    - gt_mask: Tensor of ground truth masks with values 0 and 1.
+    - a, b, q: Hyperparameters for the Dual Focal Loss calculation.
+
+    Returns:
+    - loss: Computed Dual Focal Loss.
+    """
+    # Convert predicted masks to probability range [0, 1]
+    predicted_probs = torch.sigmoid(predicted_masks)
+    
+    # Compute the first part of the loss: -y_i,n * log(z_i,n)
+    loss_1 = -gt_mask * torch.log(predicted_probs)
+    
+    # Compute the second part of the loss: b(1 - y_i,n) * log(q - z_i,n)
+    loss_2 = b * (1 - gt_mask) * torch.log(q - predicted_probs)
+    
+    # Compute the third part of the loss: a|y_i,n - z_i,n|
+    loss_3 = a * torch.abs(gt_mask - predicted_probs)
+    
+    # Sum the three parts to get the total loss
+    total_loss = loss_1 + loss_2 + loss_3
+    
+    # Normalize by num_boxes as in the sigmoid focal loss example
+    if total_loss.dim() > 1:
+        # Assuming the first dimension (dim=0) is batch, mean over dim=1 if total_loss is not a 1D tensor
+        return total_loss.mean(1).sum() / num_boxes
+    else:
+        # If total_loss is already 1D, just sum and normalize
+        return total_loss.sum() / num_boxes
+    
 class PostProcessSegm(nn.Module):
-    def __init__(self, threshold=0.5):
+    def __init__(self, threshold=0.2):
         super().__init__()
         self.threshold = threshold
 
-    @torch.no_grad()
     def forward(self, results, outputs, orig_target_sizes, max_target_sizes):
         assert len(orig_target_sizes) == len(max_target_sizes)
         max_h, max_w = max_target_sizes.max(0)[0].tolist()
         outputs_masks = outputs["pred_masks"].squeeze(2)
         outputs_masks = F.interpolate(outputs_masks, size=(max_h, max_w), mode="bilinear", align_corners=False)
-        outputs_masks = (outputs_masks.sigmoid() > self.threshold).cpu()
-
-        for i, (cur_mask, t, tt) in enumerate(zip(outputs_masks, max_target_sizes, orig_target_sizes)):
-            img_h, img_w = t[0], t[1]
-            results[i]["masks"] = cur_mask[:, :img_h, :img_w].unsqueeze(1)
-            results[i]["masks"] = F.interpolate(
-                results[i]["masks"].float(), size=tuple(tt.tolist()), mode="nearest"
-            ).byte()
-
+        
+        # Soft thresholding
+        results = torch.sigmoid(outputs_masks / self.threshold)
         return results
 
 

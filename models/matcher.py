@@ -15,8 +15,9 @@ Modules to compute the matching cost and solve the corresponding LSAP.
 import torch
 from scipy.optimize import linear_sum_assignment
 from torch import nn
-
-from util.box_ops import box_cxcywh_to_xyxy, generalized_box_iou
+import torch.nn.functional as F
+from util.box_ops import box_cxcywh_to_xyxy, generalized_box_iou, masks_to_boxes
+from util.mask_ops import mask_iou_calculation
 from models.structures import Instances
 
 
@@ -27,11 +28,13 @@ class HungarianMatcher(nn.Module):
     there are more predictions than targets. In this case, we do a 1-to-1 matching of the best predictions,
     while the others are un-matched (and thus treated as non-objects).
     """
-
     def __init__(self,
                  cost_class: float = 1,
                  cost_bbox: float = 1,
-                 cost_giou: float = 1):
+                 cost_giou: float = 1,
+                 # (1) Adding mask
+                 cost_mask: float = 1,
+                 ):
         """Creates the matcher
 
         Params:
@@ -43,6 +46,8 @@ class HungarianMatcher(nn.Module):
         self.cost_class = cost_class
         self.cost_bbox = cost_bbox
         self.cost_giou = cost_giou
+        # (2) Adding masks
+        self.cost_mask = cost_mask
         assert cost_class != 0 or cost_bbox != 0 or cost_giou != 0, "all costs cant be 0"
 
     def forward(self, outputs, targets, use_focal=True):
@@ -65,6 +70,18 @@ class HungarianMatcher(nn.Module):
             For each batch element, it holds:
                 len(index_i) = len(index_j) = min(num_queries, num_target_boxes)
         """
+
+        def save_image(feature_map, layer_name):
+            image_path = "/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR-mask-AppleMots/output/pred_masks/matcher_py"
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            for i in range(feature_map.size(0)):
+                plt.imshow(feature_map[i, 0].detach().cpu().numpy(), cmap='gray')
+                plt.title(f"{layer_name}_{i}")
+                filename = f"{layer_name}_{i}_{timestamp}.png"
+                plt.savefig(os.path.join(image_path, filename))
+                plt.close()
+
+
         with torch.no_grad():
             bs, num_queries = outputs["pred_logits"].shape[:2]
 
@@ -76,6 +93,7 @@ class HungarianMatcher(nn.Module):
             out_bbox = outputs["pred_boxes"].flatten(0, 1)  # [batch_size * num_queries, 4]
 
             # Also concat the target labels and boxes
+            # print("targets[0] in matcher is:", targets)
             if isinstance(targets[0], Instances):
                 tgt_ids = torch.cat([gt_per_img.labels for gt_per_img in targets])
                 tgt_bbox = torch.cat([gt_per_img.boxes for gt_per_img in targets])
@@ -90,6 +108,7 @@ class HungarianMatcher(nn.Module):
                 neg_cost_class = (1 - alpha) * (out_prob ** gamma) * (-(1 - out_prob + 1e-8).log())
                 pos_cost_class = alpha * ((1 - out_prob) ** gamma) * (-(out_prob + 1e-8).log())
                 cost_class = pos_cost_class[:, tgt_ids] - neg_cost_class[:, tgt_ids]
+                
             else:
                 # Compute the classification cost. Contrary to the loss, we don't use the NLL,
                 # but approximate it in 1 - proba[target class].
@@ -102,11 +121,30 @@ class HungarianMatcher(nn.Module):
             # Compute the giou cost betwen boxes
             cost_giou = -generalized_box_iou(box_cxcywh_to_xyxy(out_bbox),
                                              box_cxcywh_to_xyxy(tgt_bbox))
+            
+            
+            # (3) Adding out_mask
+            if 'pred_masks' in outputs:
+                out_mask = outputs['pred_masks'].flatten(0, 1)  # [batch_size * num_queries, H, W]
+                if isinstance(targets[0], Instances):
+                    tgt_mask = torch.cat([gt_per_img.masks for gt_per_img in targets])
+                else:
+                    tgt_mask = torch.cat([v['masks'] for v in targets]) 
+                out_mask = interpolate(out_mask, size=tgt_mask.shape[-2:],
+                                mode="nearest")
+                save_image(out_mask, 'matcher')
+                out_mask = out_mask.flatten(0, 1)
 
-            # Final cost matrix
-            C = self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou
-            C = C.view(bs, num_queries, -1).cpu()
-
+                num_boxes = sum(len(gt_per_img.boxes) for gt_per_img in targets) if isinstance(targets[0], Instances) else sum(len(v["boxes"]) for v in targets)
+                cost_mask = mask_iou_calculation (out_mask, tgt_mask)
+                # print('cost_mask in matcher is:', cost_mask)
+                # C = (self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou)
+                C = (self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou + self.cost_mask * cost_mask)
+                C = C.view(bs, num_queries, -1).cpu()
+            else: 
+                C = (self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou)
+                C = C.view(bs, num_queries, -1).cpu()
+                
             if isinstance(targets[0], Instances):
                 sizes = [len(gt_per_img.boxes) for gt_per_img in targets]
             else:
@@ -117,6 +155,13 @@ class HungarianMatcher(nn.Module):
 
 
 def build_matcher(args):
-    return HungarianMatcher(cost_class=args.set_cost_class,
+        return HungarianMatcher(cost_class=args.set_cost_class,
                             cost_bbox=args.set_cost_bbox,
-                            cost_giou=args.set_cost_giou)
+                            cost_giou=args.set_cost_giou,
+                            cost_mask = args.set_cost_mask,
+                            )
+
+
+
+
+

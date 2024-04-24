@@ -99,6 +99,47 @@ def train_one_epoch_mot(model: torch.nn.Module, criterion: torch.nn.Module,
     metric_logger.add_meter('grad_norm', utils.SmoothedValue(window_size=1, fmt='{value:.2f}'))
     header = 'Epoch: [{}]'.format(epoch)
     print_freq = 10
+    
+    # Defining function to log gradient of different part of the model 
+    writer_grad = SummaryWriter('/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR-mask-AppleMots/outputs/logs_grad') 
+    def log_gradients(model, writer_grad, epoch, iteration):
+        # Check if the model is wrapped in DistributedDataParallel
+        if isinstance(model, torch.nn.parallel.DistributedDataParallel):
+            model = model.module
+
+        modules = {
+            'backbone': model.backbone,
+            'encoder': model.transformer.encoder,
+            'decoder': model.transformer.decoder,
+            'input_proj': model.input_proj,
+            'bbox_attention/q_linear': model.bbox_attention.q_linear,
+            'bbox_attention/k_linear': model.bbox_attention.k_linear,
+            'mask_head/lay1': model.mask_head.lay1,
+            'mask_head/gn1': model.mask_head.gn1,
+            'mask_head/lay2': model.mask_head.lay2,
+            'mask_head/gn2': model.mask_head.gn2,
+            'mask_head/lay3': model.mask_head.lay3,
+            'mask_head/gn3': model.mask_head.gn3,
+            'mask_head/lay4': model.mask_head.lay4,
+            'mask_head/gn4': model.mask_head.gn4,
+            'mask_head/lay5': model.mask_head.lay5,
+            'mask_head/gn5': model.mask_head.gn5,
+            'mask_head/out_lay': model.mask_head.out_lay,
+            'mask_head/adapter1': model.mask_head.adapter1,
+            'mask_head/adapter2': model.mask_head.adapter2,
+            'mask_head/adapter3': model.mask_head.adapter3,
+            'postprocessor': model.postprocessor,
+            'post_process': model.post_process,
+            'criterion': model.criterion
+        }
+
+        for name, module in modules.items():
+            total_grad_norm = 0
+            for param in module.parameters():
+                if param.grad is not None:
+                    total_grad_norm += param.grad.data.norm(2).item()
+            writer_grad.add_scalar(f'grad_norm/{name}', total_grad_norm, epoch * len(data_loader) + iteration)
+    iteration = 0
 
     # for samples, targets in metric_logger.log_every(data_loader, print_freq, header):
     for data_dict in metric_logger.log_every(data_loader, print_freq, header):
@@ -128,6 +169,10 @@ def train_one_epoch_mot(model: torch.nn.Module, criterion: torch.nn.Module,
 
         optimizer.zero_grad()
         losses.backward()
+        
+        # Adding gradients
+        log_gradients(model, writer_grad, epoch, iteration)
+        
         if max_norm > 0:
             grad_total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
         else:
@@ -140,7 +185,7 @@ def train_one_epoch_mot(model: torch.nn.Module, criterion: torch.nn.Module,
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
         metric_logger.update(grad_norm=grad_total_norm)
         # gather the stats from all processes
-
+        iteration+=1
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}

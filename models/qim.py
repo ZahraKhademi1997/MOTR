@@ -11,7 +11,7 @@ from typing import Optional, List
 from util import box_ops
 from util.misc import inverse_sigmoid
 from models.structures import Boxes, Instances, pairwise_iou
-
+import gc
 
 def random_drop_tracks(track_instances: Instances, drop_probability: float) -> Instances:
     if drop_probability > 0 and len(track_instances) > 0:
@@ -133,7 +133,13 @@ class QueryInteractionModule(QueryInteractionBase):
     def _select_active_tracks(self, data: dict) -> Instances:
         track_instances: Instances = data['track_instances']
         if self.training:
-            active_idxes = (track_instances.obj_idxes >= 0) & (track_instances.iou > 0.5)
+            # Solving the device problem in multiple gpus
+            track_instances = track_instances
+             
+            # changing track_instances.iou to track_instances.iou_boxes --> motr.py
+            # active_idxes = (track_instances.obj_idxes >= 0) & (track_instances.iou > 0.5)
+            active_idxes = (track_instances.obj_idxes >= 0) & (track_instances.iou_boxes > 0.5)
+            
             active_track_instances = track_instances[active_idxes]
             # set -2 instead of -1 to ensure that these tracks will not be selected in matching.
             active_track_instances = self._random_drop_tracks(active_track_instances)
