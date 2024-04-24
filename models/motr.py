@@ -782,7 +782,6 @@ class MOTR(nn.Module):
         track_instances.pred_masks = pred_masks_interpolated
         track_instances.output_embedding = frame_res['hs'][0]
         
-        # (11) Mapping pred_masks and pred_boxes
         
         if self.training:
             # the track id will be assigned by the mather.
