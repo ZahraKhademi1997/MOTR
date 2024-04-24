@@ -1,13 +1,4 @@
 # Project Updates Documentation
-
-## TODO
-- Using the whole queries in bbox_attention
-- using conv instead of interpolation 
-- using the masks before out layer in the mask head
-
-
-
-
 This document outlines the recent enhancements and modifications to the codebase, structured by files and specific functionalities. Each point details the nature of the changes and their impact on the corresponding modules.
 
 ## Dataset Modification
