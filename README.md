@@ -50,7 +50,7 @@ This document outlines the recent enhancements and modifications to the codebase
 1. Modifying PostProcessSegm function to incorporate in gradient
 2. Defining dual_focal_loss
 3. Defining generlized_dice_loss
-4. Replaing the out_lay in MaskHeadSmallConv with 1*1Conv and adding threshold
+4. Replaing the out_lay in MaskHeadSmallConv with 1*1Conv and adding threshold --> back to 3*3 and adding relu after the last layer
 
 ## Tools Modifications
 - `misc.py`: Modifying import part to adjust for the current torchvision version
