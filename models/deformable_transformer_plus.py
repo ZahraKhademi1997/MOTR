@@ -23,10 +23,36 @@ from models.structures import Boxes, matched_boxlist_iou, pairwise_iou
 from util.misc import inverse_sigmoid
 from util.box_ops import box_cxcywh_to_xyxy
 from models.ops.modules import MSDeformAttn
+# from mmdet.models.layers.transformer.detr_layers import (DetrTransformerDecoder, DetrTransformerEncoder)
+
+from models.mmcv_utils.transformerLayerSequence import build_transformer_layer_sequence
+# from mmengine.config import ConfigDict
+# from mmengine.model import BaseModule, ModuleList, Sequential
+# from mmengine.registry import MODELS
+# from mmengine.utils import deprecated_api_warning, to_2tuple
 
 
 class DeformableTransformer(nn.Module):
     def __init__(self, d_model=256, nhead=8,
+                 seg_encoder = {
+                        'type': 'DetrTransformerEncoder',
+                        'num_layers': 1,
+                        'layer_cfg': {
+                            'attn_cfg': {
+                            'embed_dims': 256,  # or args.hidden_dim if it should scale with the model's dimension
+                            'num_heads': 1,  # Adjust the number of heads as needed
+                            'dropout': 0.1  # Set appropriate dropout rate
+                            },
+                            'ffn_cfg': {
+                                'embed_dims': 256,  # or args.hidden_dim if it should scale with the model's dimension
+                                'feedforward_channels': 1024,
+                                'num_fcs': 2,
+                                'ffn_drop': 0.1,
+                                'act_cfg': {'type': 'ReLU', 'inplace': True}
+                            },
+                            'norm_cfg': {'type': 'LN'},
+                        }
+                    },
                  num_encoder_layers=6, num_decoder_layers=6, dim_feedforward=1024, dropout=0.1,
                  activation="relu", return_intermediate_dec=False,
                  num_feature_levels=4, dec_n_points=4,  enc_n_points=4,
@@ -53,6 +79,12 @@ class DeformableTransformer(nn.Module):
         self.decoder = DeformableTransformerDecoder(decoder_layer, num_decoder_layers, return_intermediate_dec)
 
         self.level_embed = nn.Parameter(torch.Tensor(num_feature_levels, d_model))
+        
+        # Adding mask encoding and decoding attributes
+        self.seg_encoder = build_transformer_layer_sequence(seg_encoder)
+        self.mask_channels = nhead
+        self.mask_trans = nn.Linear(self.d_model, self.mask_channels)
+        self.mask_trans_norm = nn.LayerNorm(self.mask_channels)
 
         if two_stage:
             self.enc_output = nn.Linear(d_model, d_model)
@@ -132,6 +164,21 @@ class DeformableTransformer(nn.Module):
         valid_ratio = torch.stack([valid_ratio_w, valid_ratio_h], -1)
         return valid_ratio
 
+    @staticmethod
+    def get_reference_points(spatial_shapes, valid_ratios, device):
+        reference_points_list = []
+        for lvl, (H_, W_) in enumerate(spatial_shapes):
+
+            ref_y, ref_x = torch.meshgrid(torch.linspace(0.5, H_ - 0.5, H_, dtype=torch.float32, device=device),
+                                          torch.linspace(0.5, W_ - 0.5, W_, dtype=torch.float32, device=device))
+            ref_y = ref_y.reshape(-1)[None] / (valid_ratios[:, None, lvl, 1] * H_)
+            ref_x = ref_x.reshape(-1)[None] / (valid_ratios[:, None, lvl, 0] * W_)
+            ref = torch.stack((ref_x, ref_y), -1)
+            reference_points_list.append(ref)
+        reference_points = torch.cat(reference_points_list, 1)
+        reference_points = reference_points[:, :, None] * valid_ratios[:, None]
+        return reference_points
+
     def forward(self, srcs, masks, pos_embeds, query_embed=None, ref_pts=None):
         assert self.two_stage or query_embed is not None
 
@@ -141,6 +188,7 @@ class DeformableTransformer(nn.Module):
         lvl_pos_embed_flatten = []
         spatial_shapes = []
         for lvl, (src, mask, pos_embed) in enumerate(zip(srcs, masks, pos_embeds)):
+            # print('src in deformable_transformer_plus is:', src.shape)
             bs, c, h, w = src.shape
             spatial_shape = (h, w)
             spatial_shapes.append(spatial_shape)
@@ -148,6 +196,7 @@ class DeformableTransformer(nn.Module):
             mask = mask.flatten(1)
             pos_embed = pos_embed.flatten(2).transpose(1, 2)
             lvl_pos_embed = pos_embed + self.level_embed[lvl].view(1, 1, -1)
+            
             lvl_pos_embed_flatten.append(lvl_pos_embed)
             src_flatten.append(src)
             mask_flatten.append(mask)
@@ -157,11 +206,50 @@ class DeformableTransformer(nn.Module):
         spatial_shapes = torch.as_tensor(spatial_shapes, dtype=torch.long, device=src_flatten.device)
         level_start_index = torch.cat((spatial_shapes.new_zeros((1, )), spatial_shapes.prod(1).cumsum(0)[:-1]))
         valid_ratios = torch.stack([self.get_valid_ratio(m) for m in masks], 1)
-
-        # encoder
-        memory = self.encoder(src_flatten, spatial_shapes, level_start_index, valid_ratios, lvl_pos_embed_flatten, mask_flatten)
-        # prepare input for decoder
+        # print('spatial_shapes in deformbale_transformer_plus is:', spatial_shapes) #tensor([[108, 192], ...], device='cuda:0')
+        # print('valid_ratios in deformbale_transformer_plus is:', valid_ratios) #tensor([[[1., 1.]]], device='cuda:0')
+        # print('src_flatten in deformbale_transformer_plus is:', src_flatten.shape) #torch.Size([1, 29970, 256])
+        # print('mask_flatten in deformbale_transformer_plus is:', mask_flatten.shape) #orch.Size([1, 29970])
+        # print('level_start_index in deformbale_transformer_plus is:', level_start_index) #tensor([    0, 22560, 28200, 29610], device='cuda:0')
+        # print('lvl_pos_embed_flatten in deformbale_transformer_plus is:', lvl_pos_embed_flatten.shape) #torch.Size([1, 29970, 256])
+        
+        memory = self.encoder(src_flatten, spatial_shapes, level_start_index, valid_ratios, lvl_pos_embed_flatten, mask_flatten) # For bboxes
         bs, _, c = memory.shape
+        # print('memory in deformable_transformer_plus is:', memory.shape) #torch.Size([1, 29970, 256])
+        # Getting the segmentation mask
+        reference_points_mask = \
+            self.get_reference_points(spatial_shapes,
+                                      valid_ratios,
+                                      device=src_flatten.device)
+        
+        seg_memory = memory[:, level_start_index[0]:level_start_index[1], :]
+        seg_pos_embed = lvl_pos_embed_flatten[:, 
+            level_start_index[0]:level_start_index[1], :]
+        seg_mask = mask_flatten[:, level_start_index[0]:level_start_index[1]]
+        # print('reference_points_mask shape transformer:', reference_points_mask.shape)
+        seg_reference_points = reference_points_mask[
+            :, level_start_index[0]:level_start_index[1], [0], :]
+        seg_memory = seg_memory.permute(1, 0, 2)
+        seg_pos_embed = seg_pos_embed.permute(1,0,2)
+        seg_memory = self.seg_encoder(
+            query=seg_memory,
+            key=None,
+            value=None,
+            query_pos=seg_pos_embed,
+            key_padding_mask=seg_mask.permute(1,0),
+            spatial_shapes=spatial_shapes[[0]],
+            reference_points=seg_reference_points,
+            level_start_index=level_start_index[0],
+            valid_ratios=valid_ratios[:, [0], :],
+            )
+        
+        seg_memory = self.mask_trans_norm(self.mask_trans(seg_memory))
+        mask_proto = (seg_memory, seg_pos_embed, seg_mask,
+                      spatial_shapes[[0]], seg_reference_points,
+                      level_start_index[0], valid_ratios[:, [0], :])
+        
+        # print('mask_proto in deformable_transformer_plus is:', mask_proto) 
+        
         if self.two_stage:
             output_memory, output_proposals = self.gen_encoder_output_proposals(memory, mask_flatten, spatial_shapes)
 
@@ -193,8 +281,14 @@ class DeformableTransformer(nn.Module):
 
         inter_references_out = inter_references
         if self.two_stage:
-            return hs, init_reference_out, inter_references_out, enc_outputs_class, enc_outputs_coord_unact
-        return hs, init_reference_out, inter_references_out, None, None
+            return hs, init_reference_out, inter_references_out, enc_outputs_class, enc_outputs_coord_unact,mask_proto
+        #######################################################################
+        # (1) Adding memory to output in format that segmentation head expected
+        # return hs, init_reference_out, inter_references_out, None, None
+        # return hs, init_reference_out, inter_references_out, None, None, memory.permute(1, 2, 0).view(bs, c, h, w)
+        # return hs, init_reference_out, inter_references_out, None, None, whole_memory 
+        return hs, init_reference_out, inter_references_out, None, None, mask_proto
+    #######################################################################
 
 
 class DeformableTransformerEncoderLayer(nn.Module):
@@ -443,11 +537,31 @@ def _get_activation_fn(activation):
     raise RuntimeError(F"activation should be relu/gelu, not {activation}.")
 
 
-
 def build_deforamble_transformer(args):
+    seg_encoder = {
+        'type': 'DetrTransformerEncoder',
+        'num_layers': 1,
+        'layer_cfg': {
+            'self_attn_cfg': {
+            'embed_dims': 256,  # or args.hidden_dim if it should scale with the model's dimension
+            'num_heads': 1,  # Adjust the number of heads as needed
+            'dropout': 0.1  # Set appropriate dropout rate
+            },
+            'ffn_cfg': {
+                'embed_dims': 256,  # or args.hidden_dim if it should scale with the model's dimension
+                'feedforward_channels': 1024,
+                'num_fcs': 2,
+                'ffn_drop': 0.1,
+                'act_cfg': {'type': 'ReLU', 'inplace': True}
+            },
+            'norm_cfg': {'type': 'LN'},
+        }
+    }
+
     return DeformableTransformer(
         d_model=args.hidden_dim,
         nhead=args.nheads,
+        seg_encoder=seg_encoder,
         num_encoder_layers=args.enc_layers,
         num_decoder_layers=args.dec_layers,
         dim_feedforward=args.dim_feedforward,
@@ -463,5 +577,10 @@ def build_deforamble_transformer(args):
         sigmoid_attn=args.sigmoid_attn,
         extra_track_attn=args.extra_track_attn,
     )
+
+
+
+
+
 
 
