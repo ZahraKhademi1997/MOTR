@@ -218,8 +218,105 @@ class ClipMatcher(SetCriterion):
         for t in gt_instances:
             masks_field = t.get('masks')
             masks.append(masks_field)
-        # TODO use valid to mask invalid areas due to padding in loss
-        target_masks, valid = nested_tensor_from_tensor_list(masks).decompose()
+        
+        # For MOTS 
+        #######################################################################################
+        # Plotting sampling points
+        def save_sampled_points_on_masks(src_mask, tgt_mask, point_coords, index=0):
+            """
+            Save sampled points on both the prediction and groundtruth masks to files.
+            
+            Args:
+            - src_mask (Tensor): The predicted masks tensor [H, W].
+            - tgt_mask (Tensor): The groundtruth masks tensor [H, W].
+            - point_coords (Tensor): The coordinates of sampled points [num_points, 2].
+            - output_dir (str): Directory to save the images.
+            - index (int): Index of the sample to plot in batch.
+            """
+            if src_mask.size(0) > index and tgt_mask.size(0) > index: 
+                src_mask = src_mask[index].squeeze().cpu().numpy()  # Squeeze and move tensor to CPU
+                tgt_mask = tgt_mask[index].squeeze().cpu().numpy()  # Squeeze and move tensor to CPU
+                point_coords = point_coords[index].cpu().numpy()  # Move tensor to CPU
+
+                # Normalize and scale point coordinates to match image dimensions
+                point_coords[:, 0] *= src_mask.shape[0]  # Scale y coordinates
+                point_coords[:, 1] *= src_mask.shape[1]  # Scale x coordinates
+
+                fig, axs = plt.subplots(1, 2, figsize=(12, 6))
+
+                # Plot for source mask
+                axs[0].imshow(src_mask, cmap='gray')
+                axs[0].scatter(point_coords[:, 1], point_coords[:, 0], color='green', s=0.5)
+                axs[0].set_title('Sampled Points on Prediction Mask')
+
+                # Plot for target mask
+                axs[1].imshow(tgt_mask, cmap='gray')
+                axs[1].scatter(point_coords[:, 1], point_coords[:, 0], color='green', s=0.5)
+                axs[1].set_title('Sampled Points on Groundtruth Mask')
+                
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                filename = f"comparison_{timestamp}.png"
+                filepath = os.path.join('/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR-mask-MOT17-Cross-AA/output/sampled_points', filename)
+        
+                # Save the figure
+                plt.savefig(filepath)
+                plt.close()
+            
+            
+        # Check if all masks in the list are non-empty
+        def create_false_mask_with_size(size, device):
+            # Adjust the size to ensure it has three dimensions
+            return torch.zeros((1, size[0], size[1]), dtype=torch.bool, device=device)
+        
+        
+        def duplicate_first_non_empty_mask(masks):
+            # Find the first non-empty mask
+            non_empty_mask = None
+            for mask in masks:
+                if mask.nelement() > 0:
+                    non_empty_mask = mask
+                    break
+
+            # If no non-empty mask is found, return None
+            if non_empty_mask is None:
+                return None
+
+            # Create new masks, replacing empty ones with a duplicate of the first non-empty mask
+            new_masks = []
+            for mask in masks:
+                if mask.nelement() == 0:
+                    new_masks.append(non_empty_mask.clone())  # Duplicate the first non-empty mask
+                else:
+                    new_masks.append(mask)
+
+            return new_masks
+        
+        
+        if all(mask.nelement() > 0 for mask in masks):
+            target_masks, valid = nested_tensor_from_tensor_list(masks).decompose()
+            
+        elif any(mask.nelement() > 0 for mask in masks):
+            # Some masks are empty, but not all. Use the duplication function.
+            new_masks = duplicate_first_non_empty_mask(masks)
+            if new_masks is not None:
+                target_masks, valid = nested_tensor_from_tensor_list(new_masks).decompose()
+                
+        else:
+            new_masks = []
+            for mask in masks:
+                if mask.nelement() == 0:
+                    size = mask.size()[1:] if mask.size()[0] == 0 else mask.size()
+                    new_mask = create_false_mask_with_size(size, mask.device)
+                    new_masks.append(new_mask)
+                else:
+                    new_masks.append(mask)
+
+            # Decompose the new list of masks
+            target_masks, valid = nested_tensor_from_tensor_list(new_masks).decompose()
+        ########################################################################################
+        
+        # For AppleMOTS
+        # target_masks, valid = nested_tensor_from_tensor_list(masks).decompose()
         target_masks = target_masks.to(src_masks)
         target_masks = target_masks[tgt_idx]
         size = target_masks.shape[-2:]
@@ -793,7 +890,7 @@ class MOTR(nn.Module):
             # print('cross_attended_output:', cross_attended_output.shape) # torch.Size([1, 300, 256])
             pred_masks = torch.einsum("bqc,bchw->bqhw", cross_attended_output, attention_embedding)
             # pred_masks = pred_masks.sigmoid()
-            pred_masks = pred_masks.relu()
+            pred_masks = pred_masks.sigmoid()
         
         out = {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1], 'ref_pts': ref_pts_all[5], 'pred_masks': pred_masks}
         
