@@ -7,10 +7,11 @@ import torch
 from torch import nn, Tensor
 from torch.nn import functional as F
 from typing import Optional, List
-
+import numpy as np
 from util import box_ops
 from util.misc import inverse_sigmoid
 from models.structures import Boxes, Instances, pairwise_iou
+
 
 
 def random_drop_tracks(track_instances: Instances, drop_probability: float) -> Instances:
@@ -132,14 +133,29 @@ class QueryInteractionModule(QueryInteractionBase):
 
     def _select_active_tracks(self, data: dict) -> Instances:
         track_instances: Instances = data['track_instances']
+        
         if self.training:
-            active_idxes = (track_instances.obj_idxes >= 0) & (track_instances.iou > 0.5)
+            # ##################################################################################
+            # # (1) Solving the device problem
+            # # device = 'cuda:0'
+            # track_instances = track_instances
+            # ##################################################################################
+            
+            ##################################################################################
+            # (2) changing track_instances.iou to track_instances.iou_boxes --> motr.py
+            # active_idxes = (track_instances.obj_idxes >= 0) & (track_instances.iou > 0.5)
+            active_idxes = (track_instances.obj_idxes >= 0) & (track_instances.iou_boxes > 0.5)
+            ##################################################################################
+            
+            active_idxes = active_idxes
+            # print('active_idxes.device in qim is:', track_instances.obj_idxes.device)
             active_track_instances = track_instances[active_idxes]
             # set -2 instead of -1 to ensure that these tracks will not be selected in matching.
             active_track_instances = self._random_drop_tracks(active_track_instances)
             if self.fp_ratio > 0:
                 active_track_instances = self._add_fp_tracks(track_instances, active_track_instances)
         else:
+            track_instances = track_instances.to(track_instances.obj_idxes.device)
             active_track_instances = track_instances[track_instances.obj_idxes >= 0]
 
         return active_track_instances
@@ -152,9 +168,12 @@ class QueryInteractionModule(QueryInteractionBase):
         query_pos = track_instances.query_pos[:, :dim // 2]
         query_feat = track_instances.query_pos[:, dim//2:]
         q = k = query_pos + out_embed
+        k = k.to(q.device)
+        tgt = out_embed.to(q.device)
+        # print("q device:", q.device, "k device:", k.device, "value device:", tgt.device, "w_q device:", self.self_attn.in_proj_weight.device)
+        tgt2 = (self.self_attn(q[:, None], k[:, None], value=tgt[:, None])[0][:, 0]).to(q.device)
+        
 
-        tgt = out_embed
-        tgt2 = self.self_attn(q[:, None], k[:, None], value=tgt[:, None])[0][:, 0]
         tgt = tgt + self.dropout1(tgt2)
         tgt = self.norm1(tgt)
 
@@ -176,10 +195,15 @@ class QueryInteractionModule(QueryInteractionBase):
         track_instances.ref_pts = inverse_sigmoid(track_instances.pred_boxes[:, :2].detach().clone())
         return track_instances
 
+   
     def forward(self, data) -> Instances:
         active_track_instances = self._select_active_tracks(data)
         active_track_instances = self._update_track_embedding(active_track_instances)
         init_track_instances: Instances = data['init_track_instances']
+        # print('active_track_instances:', active_track_instances)
+        # print('init_track_instances:',init_track_instances)
+        # print('init_track_instances in qim:', init_track_instances['masks'].shape)
+        # print('active_track_instances in qim:', active_track_instances['masks'].shape)
         merged_track_instances = Instances.cat([init_track_instances, active_track_instances])
         return merged_track_instances
 
@@ -190,3 +214,8 @@ def build(args, layer_name, dim_in, hidden_dim, dim_out):
     }
     assert layer_name in interaction_layers, 'invalid query interaction layer: {}'.format(layer_name)
     return interaction_layers[layer_name](args, dim_in, hidden_dim, dim_out)
+
+
+
+
+
