@@ -16,7 +16,7 @@ import json
 import random
 import time
 from pathlib import Path
-
+import os
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
@@ -24,11 +24,30 @@ import datasets
 
 from util.motdet_eval import motdet_evaluate, detmotdet_evaluate
 from util.tool import load_model
+from util.render import visualization
 import util.misc as utils
 import datasets.samplers as samplers
 from datasets import build_dataset, get_coco_api_from_dataset
 from engine import evaluate, train_one_epoch, train_one_epoch_mot
 from models import build_model
+from torch.utils.tensorboard import SummaryWriter
+
+os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+
+################################################################################
+# () Tensorboard
+# from torch.utils.tensorboard import SummaryWriter
+
+
+# # Initialize the TensorBoard writer
+# writer = SummaryWriter('/home/zahra/Documents/Projects/prototype/MOTR/seg_training/tensorboard/seg_MOTR')
+# # Open log file
+# log_file = open("/home/zahra/Documents/Projects/prototype/MOTR/seg_training/tensorboard/training_log.txt", "a")
+
+################################################################################
+
+
+from util.lr_rate import WarmupThenStepLR
 
 
 def get_args_parser():
@@ -42,7 +61,7 @@ def get_args_parser():
     parser.add_argument('--weight_decay', default=1e-4, type=float)
     parser.add_argument('--epochs', default=50, type=int)
     parser.add_argument('--lr_drop', default=40, type=int)
-    parser.add_argument('--save_period', default=50, type=int)
+    parser.add_argument('--save_period', default=2, type=int)
     parser.add_argument('--lr_drop_epochs', default=None, type=int, nargs='+')
     parser.add_argument('--clip_max_norm', default=0.1, type=float,
                         help='gradient clipping max norm')
@@ -119,12 +138,13 @@ def get_args_parser():
                         help="giou box coefficient in the matching cost")
 
     # * Loss coefficients
-    parser.add_argument('--mask_loss_coef', default=1, type=float)
-    parser.add_argument('--dice_loss_coef', default=1, type=float)
+    parser.add_argument('--mask_loss_coef', default=5, type=float)
+    parser.add_argument('--dice_loss_coef', default=5, type=float)
     parser.add_argument('--cls_loss_coef', default=2, type=float)
     parser.add_argument('--bbox_loss_coef', default=5, type=float)
     parser.add_argument('--giou_loss_coef', default=2, type=float)
-    parser.add_argument('--focal_alpha', default=0.25, type=float)
+    # parser.add_argument('--focal_alpha', default=0.25, type=float)
+    parser.add_argument('--focal_alpha', default=1.25, type=float)
 
     # dataset parameters
     parser.add_argument('--dataset_file', default='coco')
@@ -151,12 +171,34 @@ def get_args_parser():
     # end-to-end mot settings.
     parser.add_argument('--mot_path', default='/data/Dataset/mot', type=str)
     parser.add_argument('--input_video', default='figs/demo.mp4', type=str)
+    # parser.add_argument('--data_txt_path_train',
+    #                     default='./datasets/data_path/detmot17.train', type=str,
+    #                     help="path to dataset txt split")
+    # parser.add_argument('--data_txt_path_val',
+    #                     default='./datasets/data_path/detmot17.train', type=str,
+    #                     help="path to dataset txt split")
+    
+    # parser.add_argument('--data_txt_path_train',
+    #                     default='./datasets/data_path/applemots.train', type=str,
+    #                     help="path to dataset txt split")
+    # parser.add_argument('--data_txt_path_val',
+    #                     default='./datasets/data_path/applemots.val', type=str,
+    #                     help="path to dataset txt split")
+    
+    # parser.add_argument('--data_txt_path_train',
+    #                     default='./datasets/data_path/mots.train', type=str,
+    #                     help="path to dataset txt split")
+    # parser.add_argument('--data_txt_path_val',
+    #                     default='./datasets/data_path/mots.train', type=str,
+    #                     help="path to dataset txt split")
+    
     parser.add_argument('--data_txt_path_train',
-                        default='./datasets/data_path/detmot17.train', type=str,
+                        default='./datasets/data_path/KITTImots.train', type=str,
                         help="path to dataset txt split")
     parser.add_argument('--data_txt_path_val',
-                        default='./datasets/data_path/detmot17.train', type=str,
+                        default='./datasets/data_path/KITTImots.val', type=str,
                         help="path to dataset txt split")
+    
     parser.add_argument('--img_path', default='data/valid/JPEGImages/')
 
     parser.add_argument('--query_interaction_layer', default='QIM', type=str,
@@ -164,7 +206,9 @@ def get_args_parser():
     parser.add_argument('--sample_mode', type=str, default='fixed_interval')
     parser.add_argument('--sample_interval', type=int, default=1)
     parser.add_argument('--random_drop', type=float, default=0)
-    parser.add_argument('--fp_ratio', type=float, default=0)
+    # For KITTI
+    # parser.add_argument('--fp_ratio', type=float, default=0)
+    parser.add_argument('--fp_ratio', type=float, default=torch.tensor([0, 0]))
     parser.add_argument('--merger_dropout', type=float, default=0.1)
     parser.add_argument('--update_query_pos', action='store_true')
 
@@ -177,10 +221,20 @@ def get_args_parser():
     parser.add_argument('--memory_bank_with_self_attn', action='store_true', default=False)
 
     parser.add_argument('--use_checkpoint', action='store_true', default=False)
+    
+    
+    # Dataloader observation
+    parser.add_argument('--play', action='store_true', help='Enable play mode for visualization')
+
     return parser
 
 
 def main(args):
+    ############################################################################
+    # () Logging
+    writer = SummaryWriter(log_dir='/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_KITTIMOTS_bbox/outputs/logs/log_loss')
+    ############################################################################
+    
     utils.init_distributed_mode(args)
     print("git:\n  {}\n".format(utils.get_sha()))
 
@@ -198,6 +252,9 @@ def main(args):
 
     model, criterion, postprocessors = build_model(args)
     model.to(device)
+    # model_dir = "/blue/hmedeiros/khademi.zahra/MOTR-train/original_MOTR_APPLEMOTS/MOTR-main/output/model.txt"
+    # with open (model_dir, "w") as f:
+    #     f.write(str(model))
 
     model_without_ddp = model
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -260,7 +317,31 @@ def main(args):
     else:
         optimizer = torch.optim.AdamW(param_dicts, lr=args.lr,
                                       weight_decay=args.weight_decay)
+        
+        
+        
+    ##########################################################################
+    # () Adopting the learning rate
+    # () Original one
     lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, args.lr_drop)
+    
+    # warmup_epochs = 10
+    # initial_lr = 2e-6  # Starting LR for warm-up
+    # target_lr = 2e-4   # LR after warm-up
+    # step_size = args.lr_drop
+    # gamma = 0.5  # Decay factor for StepLR
+    
+
+    # # Initialize your optimizer with the initial learning rate
+    # for param_group in optimizer.param_groups:
+    #     param_group['lr'] = initial_lr
+
+    # # Initialize the combined scheduler
+    # lr_scheduler = WarmupThenStepLR(optimizer, warmup_epochs, target_lr, step_size, gamma)
+    ##########################################################################
+    
+    
+
 
     if args.distributed:
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=True)
@@ -279,7 +360,10 @@ def main(args):
 
     if args.pretrained is not None:
         model_without_ddp = load_model(model_without_ddp, args.pretrained)
-
+    
+    if args.play:
+        visualization(args, data_loader_train, "train")
+        
     output_dir = Path(args.output_dir)
     if args.resume:
         if args.resume.startswith('https'):
@@ -331,11 +415,18 @@ def main(args):
             sampler_train.set_epoch(epoch)
         train_stats = train_func(
             model, criterion, data_loader_train, optimizer, device, epoch, args.clip_max_norm)
+        
+        ####################################################################################################
+        # () Logging
+        for key, value in train_stats.items():
+            writer.add_scalar(f'Training/{key}', value, epoch)
+        ####################################################################################################
+        
         lr_scheduler.step()
         if args.output_dir:
             checkpoint_paths = [output_dir / 'checkpoint.pth']
             # extra checkpoint before LR drop and every 5 epochs
-            if (epoch + 1) % args.lr_drop == 0 or (epoch + 1) % args.save_period == 0 or (((args.epochs >= 100 and (epoch + 1) > 100) or args.epochs < 100) and (epoch + 1) % 5 == 0):
+            if (epoch + 1) % args.lr_drop == 0 or (epoch + 1) % args.save_period == 0 or (((args.epochs >= 100 and (epoch + 1) > 100) or args.epochs < 100) and (epoch + 1) % 2 == 0):
                 checkpoint_paths.append(output_dir / f'checkpoint{epoch:04}.pth')
             for checkpoint_path in checkpoint_paths:
                 utils.save_on_master({
@@ -350,6 +441,14 @@ def main(args):
             test_stats, coco_evaluator = evaluate(
                 model, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir
             )
+            #############################################################
+            # Log validation metrics
+            for key, value in test_stats.items():
+               writer.add_scalar(f'Validation/{key}', value, epoch)
+            #############################################################
+
+    
+
 
             log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
                          **{f'test_{k}': v for k, v in test_stats.items()},
@@ -370,12 +469,27 @@ def main(args):
                         for name in filenames:
                             torch.save(coco_evaluator.coco_eval["bbox"].eval,
                                        output_dir / "eval" / name)
+            
+            
         if args.dataset_file in ['e2e_mot', 'e2e_dance', 'mot', 'ori_mot', 'e2e_static_mot', 'e2e_joint']:
             dataset_train.step_epoch()
             dataset_val.step_epoch()
+            
+            
+        ####################################################################################################
+        # Log learning rate
+        for i, group in enumerate(optimizer.param_groups):
+            writer.add_scalar(f'Learning_Rate/group_{i}', group['lr'], epoch)
+        ####################################################################################################
+            
+        ############################################################   
+        writer.close()
+        ############################################################  
+            
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print('Training time {}'.format(total_time_str))
+    
 
 
 if __name__ == '__main__':

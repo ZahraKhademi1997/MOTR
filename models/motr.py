@@ -8,7 +8,6 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
 # ------------------------------------------------------------------------
 
-
 """
 DETR model and criterion classes.
 """
@@ -26,6 +25,11 @@ from util.misc import (NestedTensor, nested_tensor_from_tensor_list,
                        is_dist_avail_and_initialized, inverse_sigmoid)
 
 from models.structures import Instances, Boxes, pairwise_iou, matched_boxlist_iou
+# from .segmentation import (DETRsegm, PostProcessPanoptic, PostProcessSegm,
+#                            dice_loss, sigmoid_focal_loss)
+
+from .segmentation import (DETRsegm, PostProcessPanoptic, PostProcessSegm, MHAttentionMap, MaskHeadSmallConv,
+                           dice_loss, sigmoid_focal_loss)
 
 from .backbone import build_backbone
 from .matcher import build_matcher
@@ -34,6 +38,12 @@ from .qim import build as build_query_interaction_layer
 from .memory_bank import build_memory_bank
 from .deformable_detr import SetCriterion, MLP
 from .segmentation import sigmoid_focal_loss
+import os
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+import datetime
+
+os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
 
 
 class ClipMatcher(SetCriterion):
@@ -110,6 +120,28 @@ class ClipMatcher(SetCriterion):
            targets dicts must contain the key "boxes" containing a tensor of dim [nb_target_boxes, 4]
            The target boxes are expected in format (center_x, center_y, h, w), normalized by the image size.
         """
+        
+        # Plotting
+        def plot_boxes_on_axes(ax, boxes, img_size, color, label):
+            """ Helper function to add boxes to axes. """
+            
+            ax.set_xlim(0, img_size[0])
+            ax.set_ylim(0, img_size[1])
+            ax.set_aspect('equal')
+            ax.set_title(label)
+            ax.axis('off') 
+            
+            for box in boxes:
+                # print('box:', box)
+                box = box.detach().cpu().numpy()
+                x_min = (box[0] - box[2] / 2) * img_size[0]
+                y_min = (box[1] - box[3] / 2) * img_size[1]
+                width = box[2] * img_size[0]
+                height = box[3] * img_size[1]
+                rect = patches.Rectangle((x_min, y_min), width, height, linewidth=2, edgecolor=color, facecolor='none')
+                ax.add_patch(rect)
+            
+    
         # We ignore the regression loss of the track-disappear slots.
         #TODO: Make this filter process more elegant.
         filtered_idx = []
@@ -123,8 +155,32 @@ class ClipMatcher(SetCriterion):
 
         # for pad target, don't calculate regression loss, judged by whether obj_id=-1
         target_obj_ids = torch.cat([gt_per_img.obj_ids[i] for gt_per_img, (_, i) in zip(gt_instances, indices)], dim=0) # size(16)
+        # print('outputs:', outputs)
+        # print('gt_instances:', gt_instances)
+        # print('target_obj_ids:', target_obj_ids)
+        # print('target_boxes:', target_boxes)
         mask = (target_obj_ids != -1)
+        # print('src_boxes[mask]:', src_boxes[mask], 'target_boxes[mask]:', target_boxes[mask])
+        
+        
+        # target_masks, valid = nested_tensor_from_tensor_list([inst.masks for inst in gt_instances]).decompose()
+        # target_masks = target_masks.to(target_boxes)
+        # target_masks = target_masks[mask]
+        # img_size = (target_masks.shape[1], target_masks.shape[2])
+        
+        # Create a plot to visualize boxes
+        # fig, axs = plt.subplots(1, 2, figsize=(12, 6))
+        # img_size = (400,450)
 
+        # plot_boxes_on_axes(axs[0], src_boxes[mask], img_size, 'red', 'Predicted Boxes')
+        # plot_boxes_on_axes(axs[1], target_boxes[mask], img_size, 'blue', 'Ground Truth Boxes')
+
+        # # Save the figure
+        # timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        # plt.savefig(os.path.join('/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_KITTIMOTS_bbox/output/box_loss', f'boxes_{timestamp}.png'))
+        # plt.close(fig)
+    
+        
         loss_bbox = F.l1_loss(src_boxes[mask], target_boxes[mask], reduction='none')
         loss_giou = 1 - torch.diag(box_ops.generalized_box_iou(
             box_ops.box_cxcywh_to_xyxy(src_boxes[mask]),
@@ -147,6 +203,7 @@ class ClipMatcher(SetCriterion):
         # The matched gt for disappear track query is set -1.
         labels = []
         for gt_per_img, (_, J) in zip(gt_instances, indices):
+            # print('gt_per_img is:', gt_per_img)
             labels_per_img = torch.ones_like(J)
             # set labels of track-appear slots to 0.
             if len(gt_per_img) > 0:
@@ -171,6 +228,34 @@ class ClipMatcher(SetCriterion):
             # TODO this should probably be a separate loss, not hacked in this one here
             losses['class_error'] = 100 - accuracy(src_logits[idx], target_classes_o)[0]
 
+        return losses
+    
+    def loss_masks(self, outputs, gt_instances: List[Instances], indices, num_boxes):
+        """Compute the losses related to the masks: the focal loss and the dice loss.
+        gt_instances must contain the key "masks" containing a tensor of dim [nb_target_boxes, h, w]
+        """
+        assert "pred_masks" in outputs
+
+        src_idx = self._get_src_permutation_idx(indices)
+        tgt_idx = self._get_tgt_permutation_idx(indices)
+        src_masks = outputs["pred_masks"]
+        
+        # TODO use valid to mask invalid areas due to padding in loss
+        target_masks, valid = nested_tensor_from_tensor_list([inst.masks for inst in gt_instances]).decompose()
+        target_masks = target_masks.to(src_masks)
+        
+        src_masks = src_masks[src_idx]
+        src_masks = interpolate(src_masks[:, None], size=target_masks.shape[-2:],
+                                mode="bilinear", align_corners=False)
+        
+        
+        src_masks = src_masks[:, 0].flatten(1)
+        target_masks = target_masks[tgt_idx].flatten(1)
+        
+        losses = {
+            "loss_mask": sigmoid_focal_loss(src_masks, target_masks, num_boxes),
+            "loss_dice": dice_loss(src_masks, target_masks, num_boxes),
+        }
         return losses
 
     def match_for_single_frame(self, outputs: dict):
@@ -224,6 +309,7 @@ class ClipMatcher(SetCriterion):
         untracked_gt_instances = gt_instances_i[untracked_tgt_indexes]
 
         def match_for_single_decoder_layer(unmatched_outputs, matcher):
+            
             new_track_indices = matcher(unmatched_outputs,
                                              [untracked_gt_instances])  # list[tuple(src_idx, tgt_idx)]
 
@@ -252,7 +338,10 @@ class ClipMatcher(SetCriterion):
             gt_boxes = gt_instances_i.boxes[track_instances.matched_gt_idxes[active_idxes]]
             active_track_boxes = box_ops.box_cxcywh_to_xyxy(active_track_boxes)
             gt_boxes = box_ops.box_cxcywh_to_xyxy(gt_boxes)
+            # print('active_track_boxes in motr has the shape of:', active_track_boxes.shape)
+            # print('gt_boxes in motr has the shape of:', gt_boxes.shape)
             track_instances.iou[active_idxes] = matched_boxlist_iou(Boxes(active_track_boxes), Boxes(gt_boxes))
+            # print(' track_instances.iou_boxes in motr is:',  track_instances.iou)
 
         # step7. merge the unmatched pairs and the matched pairs.
         matched_indices = torch.cat([new_matched_indices, prev_matched_indices], dim=0)
@@ -301,29 +390,71 @@ class ClipMatcher(SetCriterion):
         return losses
 
 
+# class RuntimeTrackerBase(object):
+#     def __init__(self, score_thresh=0.7, filter_score_thresh=0.6, miss_tolerance=5):
+#         self.score_thresh = score_thresh
+#         self.filter_score_thresh = filter_score_thresh
+#         self.miss_tolerance = miss_tolerance
+#         self.max_obj_id = 0
+
+#     def clear(self):
+#         self.max_obj_id = 0
+
+#     def update(self, track_instances: Instances):
+#         track_instances.disappear_time[track_instances.scores >= self.score_thresh] = 0
+#         for i in range(len(track_instances)):
+#             if track_instances.obj_idxes[i] == -1 and track_instances.scores[i] >= self.score_thresh:
+#                 # print("track {} has score {}, assign obj_id {}".format(i, track_instances.scores[i], self.max_obj_id))
+#                 track_instances.obj_idxes[i] = self.max_obj_id
+#                 self.max_obj_id += 1
+#             elif track_instances.obj_idxes[i] >= 0 and track_instances.scores[i] < self.filter_score_thresh:
+#                 track_instances.disappear_time[i] += 1
+#                 if track_instances.disappear_time[i] >= self.miss_tolerance:
+#                     # Set the obj_id to -1.
+#                     # Then this track will be removed by TrackEmbeddingLayer.
+#                     track_instances.obj_idxes[i] = -1
+
 class RuntimeTrackerBase(object):
-    def __init__(self, score_thresh=0.7, filter_score_thresh=0.6, miss_tolerance=5):
+    def __init__(self, score_thresh=[0.8, 0.9], filter_score_thresh=[0.6, 0.6], miss_tolerance=[5, 5]):
+        """
+        Initializes the tracker with separate thresholds for each class based on implicit class information.
+        Assumes the highest score index represents class membership.
+
+        :param score_thresh: List of score thresholds for initiating new tracks for each class.
+        :param filter_score_thresh: List of thresholds for filtering existing tracks for each class.
+        :param miss_tolerance: List of miss tolerances for each class before a track is terminated.
+        """
         self.score_thresh = score_thresh
         self.filter_score_thresh = filter_score_thresh
         self.miss_tolerance = miss_tolerance
-        self.max_obj_id = 0
+        self.max_obj_id = [0] * len(score_thresh)  # Initialize object IDs for each class
 
     def clear(self):
-        self.max_obj_id = 0
+        """Resets the maximum object IDs for all classes."""
+        self.max_obj_id = [0] * len(self.score_thresh)
 
     def update(self, track_instances: Instances):
-        track_instances.disappear_time[track_instances.scores >= self.score_thresh] = 0
+        """
+        Updates tracking instances based on scores, applying class-specific thresholds and tolerances.
+        Assumes class membership from the index of the highest score in scores array.
+        """
         for i in range(len(track_instances)):
-            if track_instances.obj_idxes[i] == -1 and track_instances.scores[i] >= self.score_thresh:
-                # print("track {} has score {}, assign obj_id {}".format(i, track_instances.scores[i], self.max_obj_id))
-                track_instances.obj_idxes[i] = self.max_obj_id
-                self.max_obj_id += 1
-            elif track_instances.obj_idxes[i] >= 0 and track_instances.scores[i] < self.filter_score_thresh:
+            scores = track_instances.scores[i]
+            class_idx = scores.argmax()  # Determining class by the highest score
+            score = scores[class_idx]
+
+            # Handle new potential tracks with scores above class-specific threshold
+            if track_instances.obj_idxes[i] == -1 and score >= self.score_thresh[class_idx]:
+                track_instances.obj_idxes[i] = self.max_obj_id[class_idx]
+                self.max_obj_id[class_idx] += 1
+            
+            # Handle existing tracks that fall below the filter threshold
+            elif track_instances.obj_idxes[i] >= 0 and score < self.filter_score_thresh[class_idx]:
                 track_instances.disappear_time[i] += 1
-                if track_instances.disappear_time[i] >= self.miss_tolerance:
-                    # Set the obj_id to -1.
-                    # Then this track will be removed by TrackEmbeddingLayer.
-                    track_instances.obj_idxes[i] = -1
+                if track_instances.disappear_time[i] >= self.miss_tolerance[class_idx]:
+                    track_instances.obj_idxes[i] = -1  # Mark track for removal
+
+
 
 
 class TrackerPostProcess(nn.Module):
@@ -342,10 +473,15 @@ class TrackerPostProcess(nn.Module):
         """
         out_logits = track_instances.pred_logits
         out_bbox = track_instances.pred_boxes
-
-        prob = out_logits.sigmoid()
-        # prob = out_logits[...,:1].sigmoid()
+        
+        # For KITTI
+        # prob = out_logits.sigmoid()
+        # print('out_logits:', out_logits)
+        prob = out_logits.softmax(dim=-1)
+        # print('prob:', prob)
+        
         scores, labels = prob.max(-1)
+        # print('labels:', labels)
 
         # convert to [x0, y0, x1, y1] format
         boxes = box_ops.box_cxcywh_to_xyxy(out_bbox)
@@ -387,7 +523,11 @@ class MOTR(nn.Module):
         hidden_dim = transformer.d_model
         self.num_classes = num_classes
         self.class_embed = nn.Linear(hidden_dim, num_classes)
+        
+        # () Predicting bbox for each class
         self.bbox_embed = MLP(hidden_dim, hidden_dim, 4, 3)
+        # self.bbox_embed = MultiClassBoxMLP(hidden_dim, hidden_dim, num_classes, 3)
+        
         self.num_feature_levels = num_feature_levels
         self.use_checkpoint = use_checkpoint
         if not two_stage:
@@ -446,6 +586,7 @@ class MOTR(nn.Module):
             self.transformer.decoder.class_embed = self.class_embed
             for box_embed in self.bbox_embed:
                 nn.init.constant_(box_embed.layers[-1].bias.data[2:], 0.0)
+        
         self.post_process = TrackerPostProcess()
         self.track_base = RuntimeTrackerBase()
         self.criterion = criterion
@@ -463,8 +604,12 @@ class MOTR(nn.Module):
         track_instances.matched_gt_idxes = torch.full((len(track_instances),), -1, dtype=torch.long, device=device)
         track_instances.disappear_time = torch.zeros((len(track_instances), ), dtype=torch.long, device=device)
         track_instances.iou = torch.zeros((len(track_instances),), dtype=torch.float, device=device)
-        track_instances.scores = torch.zeros((len(track_instances),), dtype=torch.float, device=device)
-        track_instances.track_scores = torch.zeros((len(track_instances),), dtype=torch.float, device=device)
+        
+        # For KITTIMOTS
+        # track_instances.scores = torch.zeros((len(track_instances),), dtype=torch.float, device=device)
+        track_instances.scores = torch.zeros((len(track_instances), 2), dtype=torch.float, device=device)
+        # track_instances.pred_boxes = torch.zeros((len(track_instances), self.num_classes, 4), dtype=torch.float, device=device)
+
         track_instances.pred_boxes = torch.zeros((len(track_instances), 4), dtype=torch.float, device=device)
         track_instances.pred_logits = torch.zeros((len(track_instances), self.num_classes), dtype=torch.float, device=device)
 
@@ -512,9 +657,15 @@ class MOTR(nn.Module):
                 srcs.append(src)
                 masks.append(mask)
                 pos.append(pos_l)
+                # for src in srcs:
+                #     print('src has the shape of:', src.shape) 
+                #     src has the shape of: torch.Size([1, 256, 108, 192])
+                #     src has the shape of: torch.Size([1, 256, 54, 96])
+                #     src has the shape of: torch.Size([1, 256, 27, 48])
+                #     src has the shape of: torch.Size([1, 256, 14, 24])
 
         hs, init_reference, inter_references, enc_outputs_class, enc_outputs_coord_unact = self.transformer(srcs, masks, pos, track_instances.query_pos, ref_pts=track_instances.ref_pts)
-
+        
         outputs_classes = []
         outputs_coords = []
         for lvl in range(hs.shape[0]):
@@ -535,7 +686,7 @@ class MOTR(nn.Module):
             outputs_coords.append(outputs_coord)
         outputs_class = torch.stack(outputs_classes)
         outputs_coord = torch.stack(outputs_coords)
-
+        
         ref_pts_all = torch.cat([init_reference[None], inter_references[:, :, :, :2]], dim=0)
         out = {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1], 'ref_pts': ref_pts_all[5]}
         if self.aux_loss:
@@ -546,11 +697,17 @@ class MOTR(nn.Module):
     def _post_process_single_image(self, frame_res, track_instances, is_last):
         with torch.no_grad():
             if self.training:
-                track_scores = frame_res['pred_logits'][0, :].sigmoid().max(dim=-1).values
+                # track_scores = frame_res['pred_logits'][0, :].sigmoid().max(dim=-1).values
+                # For KITTI
+                track_scores = frame_res['pred_logits'][0].softmax(dim=-1)
+                
+                # print('track_scores:', track_scores)
             else:
-                track_scores = frame_res['pred_logits'][0, :, 0].sigmoid()
-
+                # track_scores = frame_res['pred_logits'][0, :, 0].sigmoid()
+                track_scores = frame_res['pred_logits'][0].softmax(dim=-1)
+       
         track_instances.scores = track_scores
+        # print('track_instances.scores:', track_instances.scores)
         track_instances.pred_logits = frame_res['pred_logits'][0]
         track_instances.pred_boxes = frame_res['pred_boxes'][0]
         track_instances.output_embedding = frame_res['hs'][0]
@@ -567,13 +724,17 @@ class MOTR(nn.Module):
             # track_instances.scores = track_instances.track_scores.sigmoid()
             if self.training:
                 self.criterion.calc_loss_for_track_scores(track_instances)
+        
+        # print('track_instances in post-processing:', track_instances)
         tmp = {}
         tmp['init_track_instances'] = self._generate_empty_tracks()
         tmp['track_instances'] = track_instances
+        # print('tmp:', tmp)
         if not is_last:
             out_track_instances = self.track_embed(tmp)
             frame_res['track_instances'] = out_track_instances
         else:
+            
             frame_res['track_instances'] = None
         return frame_res
 
@@ -599,6 +760,8 @@ class MOTR(nn.Module):
         return ret
 
     def forward(self, data: dict):
+        # print('entered forward function')
+        # print(data)
         if self.training:
             self.criterion.initialize_for_single_clip(data['gt_instances'])
         frames = data['imgs']  # list of Tensor.
@@ -608,10 +771,12 @@ class MOTR(nn.Module):
         }
 
         track_instances = self._generate_empty_tracks()
+        # print('track_instances:', track_instances)
         keys = list(track_instances._fields.keys())
         for frame_index, frame in enumerate(frames):
             frame.requires_grad = False
             is_last = frame_index == len(frames) - 1
+            # print('is_last:', is_last)
             if self.use_checkpoint and frame_index < len(frames) - 2:
                 def fn(frame, *args):
                     frame = nested_tensor_from_tensor_list([frame])
@@ -642,9 +807,11 @@ class MOTR(nn.Module):
             else:
                 frame = nested_tensor_from_tensor_list([frame])
                 frame_res = self._forward_single_image(frame, track_instances)
+                
             frame_res = self._post_process_single_image(frame_res, track_instances, is_last)
 
             track_instances = frame_res['track_instances']
+            # print('track_instances:', track_instances)
             outputs['pred_logits'].append(frame_res['pred_logits'])
             outputs['pred_boxes'].append(frame_res['pred_boxes'])
 
@@ -652,6 +819,7 @@ class MOTR(nn.Module):
             outputs['track_instances'] = track_instances
         else:
             outputs['losses_dict'] = self.criterion.losses_dict
+    
         return outputs
 
 
@@ -661,7 +829,7 @@ def build(args):
         'coco_panoptic': 250,
         'e2e_mot': 1,
         'e2e_dance': 1,
-        'e2e_joint': 1,
+        'e2e_joint': 2,
         'e2e_static_mot': 1,
     }
     assert args.dataset_file in dataset_to_num_classes
@@ -676,6 +844,7 @@ def build(args):
     query_interaction_layer = build_query_interaction_layer(args, args.query_interaction_layer, d_model, hidden_dim, d_model*2)
 
     img_matcher = build_matcher(args)
+    # print('args.sampler_lengths is:', args.sampler_lengths)
     num_frames_per_batch = max(args.sampler_lengths)
     weight_dict = {}
     for i in range(num_frames_per_batch):
@@ -716,4 +885,5 @@ def build(args):
         memory_bank=memory_bank,
         use_checkpoint=args.use_checkpoint,
     )
+       
     return model, criterion, postprocessors

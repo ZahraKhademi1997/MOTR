@@ -85,11 +85,19 @@ class HungarianMatcher(nn.Module):
 
             # Compute the classification cost.
             if use_focal:
+
                 alpha = 0.25
                 gamma = 2.0
                 neg_cost_class = (1 - alpha) * (out_prob ** gamma) * (-(1 - out_prob + 1e-8).log())
                 pos_cost_class = alpha * ((1 - out_prob) ** gamma) * (-(out_prob + 1e-8).log())
+                # print('pos_cost_class:', pos_cost_class.shape)
+                # print('tgt_ids:', tgt_ids)
+                # assert tgt_ids.max() < pos_cost_class.size(1), "tgt_ids exceed pos_cost_class dimensions"
+                # assert tgt_ids.min() >= 0, "tgt_ids contain negative indices"
+
+                tgt_ids = tgt_ids.long()
                 cost_class = pos_cost_class[:, tgt_ids] - neg_cost_class[:, tgt_ids]
+                
             else:
                 # Compute the classification cost. Contrary to the loss, we don't use the NLL,
                 # but approximate it in 1 - proba[target class].
@@ -106,7 +114,7 @@ class HungarianMatcher(nn.Module):
             # Final cost matrix
             C = self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou
             C = C.view(bs, num_queries, -1).cpu()
-
+            
             if isinstance(targets[0], Instances):
                 sizes = [len(gt_per_img.boxes) for gt_per_img in targets]
             else:

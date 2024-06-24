@@ -15,7 +15,9 @@ from models.structures import Boxes, Instances, pairwise_iou
 
 def random_drop_tracks(track_instances: Instances, drop_probability: float) -> Instances:
     if drop_probability > 0 and len(track_instances) > 0:
+        # print('track_instances.scores:', track_instances.scores)
         keep_idxes = torch.rand_like(track_instances.scores) > drop_probability
+        keep_idxes = keep_idxes.any(dim=1)
         track_instances = track_instances[keep_idxes]
     return track_instances
 
@@ -108,7 +110,15 @@ class QueryInteractionModule(QueryInteractionBase):
 
             # add fp for each active track in a specific probability.
             fp_prob = torch.ones_like(active_track_instances.scores) * self.fp_ratio
-            selected_active_track_instances = active_track_instances[torch.bernoulli(fp_prob).bool()]
+            
+            # print('active_track_instances.score:', active_track_instances.scores)
+            # print("Shape of fp_prob:", fp_prob.shape)
+            # print("Shape of mask from bernoulli:", torch.bernoulli(fp_prob).bool().shape)
+            # selected_active_track_instances = active_track_instances[torch.bernoulli(fp_prob).bool()]
+            mask = torch.bernoulli(fp_prob).bool()
+            keep_idxes = mask.any(dim=1)
+            selected_active_track_instances = active_track_instances[keep_idxes]
+            
 
             if len(inactive_instances) > 0 and len(selected_active_track_instances) > 0:
                 num_fp = len(selected_active_track_instances)
@@ -132,9 +142,11 @@ class QueryInteractionModule(QueryInteractionBase):
 
     def _select_active_tracks(self, data: dict) -> Instances:
         track_instances: Instances = data['track_instances']
+        # print('track_instances:', track_instances)
         if self.training:
             active_idxes = (track_instances.obj_idxes >= 0) & (track_instances.iou > 0.5)
             active_track_instances = track_instances[active_idxes]
+            # print('active_track_instances :', active_track_instances )
             # set -2 instead of -1 to ensure that these tracks will not be selected in matching.
             active_track_instances = self._random_drop_tracks(active_track_instances)
             if self.fp_ratio > 0:
@@ -177,9 +189,12 @@ class QueryInteractionModule(QueryInteractionBase):
         return track_instances
 
     def forward(self, data) -> Instances:
+        
         active_track_instances = self._select_active_tracks(data)
         active_track_instances = self._update_track_embedding(active_track_instances)
         init_track_instances: Instances = data['init_track_instances']
+        # print('init_track_instances:', init_track_instances)
+        # print('active_track_instances:', active_track_instances)
         merged_track_instances = Instances.cat([init_track_instances, active_track_instances])
         return merged_track_instances
 
