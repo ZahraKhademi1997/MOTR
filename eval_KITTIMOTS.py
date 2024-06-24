@@ -394,6 +394,7 @@ class Detector(object):
             for xyxy, track_id,label in zip(bbox_xyxy, identities,labels):
                 if track_id < 0 or track_id is None:
                     continue
+                label = int(label) + 1
                 label = int(label)
                 x1, y1, x2, y2 = xyxy
                 w, h = x2 - x1, y2 - y1
