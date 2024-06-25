@@ -420,7 +420,7 @@ class Detector(object):
         save_format = '{frame},{id},{class_id},{mask_height},{mask_width},{mask_rle}\n'
         with open(txt_path, 'a') as f:
             for xyxy, mask, track_id in zip(bbox_xyxy, masks, identities):
-                mask = sigmoid(mask)>0.7
+                mask = mask>0.6
                 
                 if track_id < 0 or track_id is None:
                     continue
