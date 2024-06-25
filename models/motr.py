@@ -795,7 +795,7 @@ class MOTR(nn.Module):
         features, pos = self.backbone(samples)
         src, mask = features[-1].decompose()
         # Per-Pixel Decoding
-        embeddings, multi_scale_features = self.PerPixelEmbedding(features)
+        embeddings, multi_scale_features = self.PerPixelEmbedding(features, (samples.tensors.shape[2], samples.tensors.shape[3]))
         # print('embeddings.shape:', embeddings.shape) # torch.Size([1, 256, 84, 117])
         # for feat in multi_scale_features:
         #     print('feat shape:', feat.shape) # torch.Size([1, 256, 21, 30]),  torch.Size([1, 256, 42, 59]), torch.Size([1, 256, 84, 117])
