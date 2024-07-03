@@ -20,7 +20,7 @@ import torchvision
 from torch import nn
 from torchvision.models._utils import IntermediateLayerGetter
 from typing import Dict, List
-
+from util.shapespec import ShapeSpec
 from util.misc import NestedTensor, is_main_process
 from .position_encoding import build_position_encoding
 
@@ -128,6 +128,14 @@ class Joiner(nn.Sequential):
 
         return out, pos
 
+    def output_shape(self):
+        return {
+            str(i): ShapeSpec(
+                channels=self.num_channels[i], stride=self.strides[i]
+            )
+            for i in range(len(self.strides))
+        }
+
 
 def build_backbone(args):
     position_embedding = build_position_encoding(args)
@@ -136,3 +144,7 @@ def build_backbone(args):
     backbone = Backbone(args.backbone, train_backbone, return_interm_layers, args.dilation)
     model = Joiner(backbone, position_embedding)
     return model
+
+
+
+

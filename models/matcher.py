@@ -15,10 +15,17 @@ Modules to compute the matching cost and solve the corresponding LSAP.
 import torch
 from scipy.optimize import linear_sum_assignment
 from torch import nn
-
-from util.box_ops import box_cxcywh_to_xyxy, generalized_box_iou
+import torch.nn.functional as F
+from util.box_ops import box_cxcywh_to_xyxy, generalized_box_iou, masks_to_boxes
+from util.mask_ops import mask_iou_calculation, batch_dice_loss, batch_sigmoid_focal_loss
 from models.structures import Instances
-
+from util.misc import (NestedTensor, nested_tensor_from_tensor_list,
+                       accuracy, get_world_size, interpolate, get_rank,
+                       is_dist_avail_and_initialized, inverse_sigmoid)
+import matplotlib.pyplot as plt
+import numpy as np
+from datetime import datetime
+import os
 
 class HungarianMatcher(nn.Module):
     """This class computes an assignment between the targets and the predictions of the network
@@ -27,11 +34,15 @@ class HungarianMatcher(nn.Module):
     there are more predictions than targets. In this case, we do a 1-to-1 matching of the best predictions,
     while the others are un-matched (and thus treated as non-objects).
     """
-
     def __init__(self,
                  cost_class: float = 1,
                  cost_bbox: float = 1,
-                 cost_giou: float = 1):
+                 cost_giou: float = 1,
+                 # (1) Adding mask
+                #  cost_mask_dice: float = 1,
+                 cost_mask: float = 1,
+                 cost_dice: float = 1,
+                 ):
         """Creates the matcher
 
         Params:
@@ -43,9 +54,26 @@ class HungarianMatcher(nn.Module):
         self.cost_class = cost_class
         self.cost_bbox = cost_bbox
         self.cost_giou = cost_giou
+        # (2) Adding masks
+        # self.cost_mask_dice = cost_mask_dice
+        self.cost_mask = cost_mask
+        self.cost_dice = cost_dice
+        
         assert cost_class != 0 or cost_bbox != 0 or cost_giou != 0, "all costs cant be 0"
 
     def forward(self, outputs, targets, use_focal=True):
+        
+        def save_image(feature_map, layer_name):
+            image_path = "/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR-mask-AppleMOTS-Axial_Cross_Attention/output/matcher"
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            for i in range(feature_map.size(0)):
+                plt.imshow(feature_map[i, 0].detach().cpu().numpy(), cmap='gray')
+                plt.title(f"{layer_name}_{i}")
+                filename = f"{layer_name}_{i}_{timestamp}.png"
+                plt.savefig(os.path.join(image_path, filename))
+                plt.close()
+                
+                
         """ Performs the matching
 
         Params:
@@ -76,6 +104,7 @@ class HungarianMatcher(nn.Module):
             out_bbox = outputs["pred_boxes"].flatten(0, 1)  # [batch_size * num_queries, 4]
 
             # Also concat the target labels and boxes
+            # print("targets[0] in matcher is:", targets)
             if isinstance(targets[0], Instances):
                 tgt_ids = torch.cat([gt_per_img.labels for gt_per_img in targets])
                 tgt_bbox = torch.cat([gt_per_img.boxes for gt_per_img in targets])
@@ -89,7 +118,12 @@ class HungarianMatcher(nn.Module):
                 gamma = 2.0
                 neg_cost_class = (1 - alpha) * (out_prob ** gamma) * (-(1 - out_prob + 1e-8).log())
                 pos_cost_class = alpha * ((1 - out_prob) ** gamma) * (-(out_prob + 1e-8).log())
+                ##############################
+                # For KITTIMOTS
+                # tgt_ids = tgt_ids.long()
+                ##############################
                 cost_class = pos_cost_class[:, tgt_ids] - neg_cost_class[:, tgt_ids]
+                
             else:
                 # Compute the classification cost. Contrary to the loss, we don't use the NLL,
                 # but approximate it in 1 - proba[target class].
@@ -99,24 +133,73 @@ class HungarianMatcher(nn.Module):
             # Compute the L1 cost between boxes
             cost_bbox = torch.cdist(out_bbox, tgt_bbox, p=1)
 
+
             # Compute the giou cost betwen boxes
             cost_giou = -generalized_box_iou(box_cxcywh_to_xyxy(out_bbox),
                                              box_cxcywh_to_xyxy(tgt_bbox))
+            
+            # (3) Adding out_mask
+            if 'pred_masks' in outputs:
+                out_mask = outputs['pred_masks']  # [batch_size * num_queries, H, W]
+                if isinstance(targets[0], Instances):
+                    tgt_mask = torch.cat([gt_per_img.masks for gt_per_img in targets])
+                else:
+                    tgt_mask = torch.cat([v['masks'] for v in targets]) 
+                # print('tgt_mask in matcher:', tgt_mask.shape)
+                # print('out_mask in matcher:', out_mask.shape)
+                # print('out_mask[:, None] in matcher:', out_mask[:, None].shape)
+                
+                out_mask = interpolate(out_mask, size=tgt_mask.shape[-2:],
+                                mode="nearest")
+                # save_image(out_mask, 'matcher')
+                # print('out_mask after interpolate in matcher:', out_mask.shape)
+                out_mask = out_mask.squeeze(0).flatten(1,-1)
+                # print('out_mask in matcher:', out_mask.shape)
+                # print('tgt_mask before in matcher:', tgt_mask.shape)
+                # tgt_mask = tgt_mask[:, 0].flatten(1)
+                tgt_mask = tgt_mask.flatten(1)
+                # print('tgt_mask in matcher:', tgt_mask.shape)
+                # num_boxes = sum(len(gt_per_img.boxes) for gt_per_img in targets) if isinstance(targets[0], Instances) else sum(len(v["boxes"]) for v in targets)
+                # cost_mask_dice = mask_iou_calculation (out_mask, tgt_mask)
+                
+                # Compute the focal loss between masks
+                cost_mask = batch_sigmoid_focal_loss(out_mask, tgt_mask)
 
-            # Final cost matrix
-            C = self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou
-            C = C.view(bs, num_queries, -1).cpu()
-
+                # Compute the dice loss betwen masks
+                cost_dice = batch_dice_loss(out_mask, tgt_mask)
+            
+                # cost_mask_focal = compute_focal_loss_matrix (out_mask, tgt_mask)
+                
+                # C = (self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou)
+                # C = (self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou + self.cost_mask_dice * cost_mask_dice )
+                C = (self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou + self.cost_dice * cost_dice + self.cost_mask * cost_mask)
+                C = C.view(bs, num_queries, -1).cpu()
+            else: 
+                C = (self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou)
+                C = C.view(bs, num_queries, -1).cpu()
+            
+            # C = (self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou)
+            # C = C.view(bs, num_queries, -1).cpu()
+                
             if isinstance(targets[0], Instances):
                 sizes = [len(gt_per_img.boxes) for gt_per_img in targets]
             else:
                 sizes = [len(v["boxes"]) for v in targets]
 
             indices = [linear_sum_assignment(c[i]) for i, c in enumerate(C.split(sizes, -1))]
-            return [(torch.as_tensor(i, dtype=torch.int64), torch.as_tensor(j, dtype=torch.int64)) for i, j in indices]
+            return [(torch.as_tensor(i, dtype=torch.int64), torch.as_tensor(j, dtype=torch.int64)) for i, j in indices] # (gt idx, pred_idx)
 
 
 def build_matcher(args):
-    return HungarianMatcher(cost_class=args.set_cost_class,
+        return HungarianMatcher(cost_class=args.set_cost_class,
                             cost_bbox=args.set_cost_bbox,
-                            cost_giou=args.set_cost_giou)
+                            cost_giou=args.set_cost_giou,
+                            # cost_mask_dice = args.set_cost_mask_dice,
+                            cost_mask = args.set_cost_mask,
+                            cost_dice = args.set_cost_dice
+                            )
+
+
+
+
+

@@ -26,12 +26,26 @@ import torch
 import torch.nn as nn
 import torch.distributed as dist
 from torch import Tensor
-
+import math
 # needed due to empty tensor bug in pytorch and torchvision 0.5
 import torchvision
-if float(torchvision.__version__[:3]) < 0.5:
+############################################################
+# (1) Comparing torchvision 0.15.2 to the below requirements
+# if float(torchvision.__version__[:4]) < 0.5:
+#     import math
+#     from torchvision.ops.misc import _NewEmptyTensorOp
+# current_version = tuple(map(int, torchvision.__version__.split('.')))
+current_version = tuple(map(int, torchvision.__version__.split('+')[0].split('.')))
+required_version = tuple(map(int, "0.5.0".split('.')))
+required_version_= tuple(map(int, "0.7.0".split('.')))
+if current_version < required_version:
+    print('current_version is:', current_version)
+    print('required_version is:', required_version)
     import math
     from torchvision.ops.misc import _NewEmptyTensorOp
+
+    
+    ############################################################
     def _check_size_scale_factor(dim, size, scale_factor):
         # type: (int, Optional[List[int]], Optional[float]) -> None
         if size is None and scale_factor is None:
@@ -56,9 +70,13 @@ if float(torchvision.__version__[:3]) < 0.5:
         return [
             int(math.floor(input.size(i + 2) * scale_factors[i])) for i in range(dim)
         ]
-elif float(torchvision.__version__[:3]) < 0.7:
+############################################################
+# (2) Comparing torchvision 0.15.2 to the below requirements
+elif current_version < required_version_:
+# elif float(torchvision.__version__[:4]) < 0.7:
     from torchvision.ops import _new_empty_tensor
     from torchvision.ops.misc import _output_size
+############################################################
 
 
 class SmoothedValue(object):
@@ -226,6 +244,7 @@ class MetricLogger(object):
             meter.synchronize_between_processes()
 
     def add_meter(self, name, meter):
+        # print('name in MetricLogger in misc.py is:', name) #lr , grad_norm
         self.meters[name] = meter
 
     def log_every(self, iterable, print_freq, header=None):
@@ -330,17 +349,18 @@ def _max_by_axis(the_list):
 
 def nested_tensor_from_tensor_list(tensor_list: List[Tensor], size_divisibility: int = 0):
     # TODO make this more general
+    
     if tensor_list[0].ndim == 3:
         # TODO make it support different-sized images
 
         max_size = _max_by_axis([list(img.shape) for img in tensor_list])
+        
         if size_divisibility > 0:
             stride = size_divisibility
             # the last two dims are H,W, both subject to divisibility requirement
             max_size[-1] = (max_size[-1] + (stride - 1)) // stride * stride
             max_size[-2] = (max_size[-2] + (stride - 1)) // stride * stride
 
-        # min_size = tuple(min(s) for s in zip(*[img.shape for img in tensor_list]))
         batch_shape = [len(tensor_list)] + max_size
         b, c, h, w = batch_shape
         dtype = tensor_list[0].dtype
@@ -353,6 +373,7 @@ def nested_tensor_from_tensor_list(tensor_list: List[Tensor], size_divisibility:
     else:
         raise ValueError('not supported')
     return NestedTensor(tensor, mask)
+    
 
 
 class NestedTensor(object):
@@ -500,26 +521,57 @@ def accuracy(output, target, topk=(1,)):
 
 
 def interpolate(input, size=None, scale_factor=None, mode="nearest", align_corners=None):
+    # print('input in interpolate has the dimension of :', input.shape) # torch.Size([2, 1, 406, 466]): (Number of masks, channel, heigh, width)
+    interpolated_masks = []
     # type: (Tensor, Optional[List[int]], Optional[float], str, Optional[bool]) -> Tensor
     """
     Equivalent to nn.functional.interpolate, but with support for empty batch sizes.
     This will eventually be supported natively by PyTorch, and this
     class can go away.
     """
-    if float(torchvision.__version__[:3]) < 0.7:
+    ######################################################################## 
+    # (3) Comparing the torchvision with the requirements
+    # if float(torchvision.__version__[:4]) < 0.7:
+    current_version = tuple(map(int, torchvision.__version__.split('+')[0].split('.')))
+    required_version = tuple(map(int, "0.7.0".split('.')))
+    if current_version < required_version:
         if input.numel() > 0:
             return torch.nn.functional.interpolate(
                 input, size, scale_factor, mode, align_corners
             )
-
         output_shape = _output_size(2, input, size, scale_factor)
         output_shape = list(input.shape[:-2]) + list(output_shape)
-        if float(torchvision.__version__[:3]) < 0.5:
+        # print('input dimension in interpolate function in misc.py is:', input.shape)
+        # print('output dimension in interpolate function in misc.py is:', output_shape)
+        ################################################################
+        # (4) Doing interpolation without _NewEmptyTensorOp and scale_factor
+        # if float(torchvision.__version__[:4]) < 0.5:
+        current_version = tuple(map(int, torchvision.__version__.split('+')[0].split('.')))
+        required_version = tuple(map(int, "0.5.0".split('.')))
+        if current_version < required_version:
             return _NewEmptyTensorOp.apply(input, output_shape)
         return _new_empty_tensor(input, output_shape)
+    ########################################################################################################################
+    # (5) interpolate one mask like (batch, channel, height, width) at a time and then concatenate them and return a tensor
     else:
+        # print("Number of masks:", len(input))
+        # for mask in input:
+        #     # print('mask is:', mask)
+        #     mask_tensor = torch.tensor(mask, dtype=torch.float32)  # Convert to a PyTorch tensor
+        #     mask_tensor = mask_tensor.unsqueeze(0) 
+        #     interpolated_mask = torchvision.ops.misc.interpolate(mask_tensor, size, scale_factor, mode, align_corners)
+        #     interpolated_masks.append(interpolated_mask)
+        # output_masks = torch.cat(interpolated_masks, dim=0)
+        # return output_masks
+        
+        
+    #     if float(torchvision.__version__[:3]) < 0.5:
+    #         return _NewEmptyTensorOp.apply(input, output_shape)
+    #     return _new_empty_tensor(input, output_shape)
+    # else:
+        # input = input.unsqueeze(0)
         return torchvision.ops.misc.interpolate(input, size, scale_factor, mode, align_corners)
-
+     ########################################################################################################################
 
 def get_total_grad_norm(parameters, norm_type=2):
     parameters = list(filter(lambda p: p.grad is not None, parameters))
