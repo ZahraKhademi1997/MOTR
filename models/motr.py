@@ -1585,8 +1585,8 @@ class ClipMatcher(SetCriterion):
             gt_labels_target = gt_labels_target.to(src_logits)
             loss_ce = sigmoid_focal_loss(src_logits.flatten(1),
                                              gt_labels_target.flatten(1),
-                                             alpha=0.25,
-                                             gamma=2,
+                                             alpha=-1,
+                                             gamma=0,
                                              num_boxes=num_boxes, mean_in_dim1=False)
             loss_ce = loss_ce.sum()
         else:
