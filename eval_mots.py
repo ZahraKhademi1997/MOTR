@@ -50,12 +50,18 @@ import matplotlib.patches as patches
 from pycocotools import mask as mask_utils
 import pycocotools.mask as mask_utils
 from scipy.ndimage import gaussian_filter
+from scipy.ndimage import gaussian_filter, binary_opening, binary_closing
 from skimage.filters import threshold_otsu
+from skimage.morphology import square
 import pandas as pd
 import datetime
 from matplotlib import patches
 from matplotlib.colors import Normalize
 import matplotlib.cm as cm
+from util.thresholding import sauvola_threshold, niblack_threshold, nick_threshold, apply_threshold, apply_gaussian_filter
+from skimage.filters import threshold_otsu, threshold_niblack, threshold_sauvola
+from scipy.ndimage import binary_opening, binary_closing, generate_binary_structure
+from scipy.ndimage import label, find_objects
 
 np.random.seed(2020)
 
@@ -306,12 +312,12 @@ class Detector(object):
         self.detr = model
 
         self.seq_num = seq_num
-        img_list = os.listdir(os.path.join(self.args.mot_path, 'MOTS/train/images', self.seq_num, 'img1'))
-        img_list = [os.path.join(self.args.mot_path, 'MOTS/train/images', self.seq_num, 'img1', _) for _ in img_list if
-                    ('jpg' in _) or ('png' in _)]
-        # img_list = os.listdir(os.path.join(self.args.mot_path, 'MOTS/test/images', self.seq_num, 'img1'))
-        # img_list = [os.path.join(self.args.mot_path, 'MOTS/test/images', self.seq_num, 'img1', _) for _ in img_list if
+        # img_list = os.listdir(os.path.join(self.args.mot_path, 'MOTS/train/images', self.seq_num, 'img1'))
+        # img_list = [os.path.join(self.args.mot_path, 'MOTS/train/images', self.seq_num, 'img1', _) for _ in img_list if
         #             ('jpg' in _) or ('png' in _)]
+        img_list = os.listdir(os.path.join(self.args.mot_path, 'MOTS/test/images', self.seq_num, 'img1'))
+        img_list = [os.path.join(self.args.mot_path, 'MOTS/test/images', self.seq_num, 'img1', _) for _ in img_list if
+                    ('jpg' in _) or ('png' in _)]
 
         self.img_list = sorted(img_list)
         self.img_len = len(self.img_list)
@@ -420,7 +426,7 @@ class Detector(object):
         img_size = (cur_img.shape[0], cur_img.shape[1])
         
         #For test
-        targets = load_label(label_path, img_size) 
+        # targets = load_label(label_path, img_size) 
         # visualize_annotations(cur_img, targets, '/home/zahra/Documents/Projects/prototype/MOTR-codes/test_mask/MOTR-MOTR_version2_mask_applemots/output/MOTS_gt/seq11')
         # return cur_img, targets
         return cur_img
@@ -463,6 +469,21 @@ class Detector(object):
             iou = (np.sum(intersection) / np.sum(union))
             return iou
         
+        def safe_iou(pred_mask, gt_mask):
+            # Calculate intersection and union
+            intersection = np.logical_and(pred_mask, gt_mask)
+            union = np.logical_or(pred_mask, gt_mask)
+            
+            # Sum the areas
+            intersection_sum = np.sum(intersection)
+            union_sum = np.sum(union)
+            
+            # Check for zero union case
+            if union_sum == 0:
+                return 0.0  # Return an IoU of 0 if there's no union; alternative approaches could be used based on context
+            else:
+                return intersection_sum / union_sum
+        
         def sigmoid(x):
             return 1 / (1 + np.exp(-x))
 
@@ -486,17 +507,18 @@ class Detector(object):
             rle = mask_utils.encode(fortran_binary_mask)
             return rle['counts'].decode('ascii')
         
+        
         # Prepare to collect statistics
         # mask_statistics = pd.DataFrame(columns=['frame_id', 'track_id', 'mask_max', 'mask_min', 'mask_mean'])
         # save_format = '{frame},{id},{mask_height},{mask_width},{mask_rle},{x1},{y1},{w},{h},1,-1,-1,-1\n'
         save_format = '{frame},{id},{class_id},{mask_height},{mask_width},{mask_rle}\n'
         with open(txt_path, 'a') as f:
             for xyxy, mask, track_id in zip(bbox_xyxy, masks, identities):
-                # Test
+                
                 # Collect data for histogram
-                mask_max = mask.max()
-                mask_min = mask.min()
-                mask_mean = mask.mean() 
+                # mask_max = mask.max()
+                # mask_min = mask.min()
+                # mask_mean = mask.mean() 
                 
                 # Append the stats to the DataFrame
                 # mask_statistics = mask_statistics.append({
@@ -510,16 +532,123 @@ class Detector(object):
                 
                 if track_id < 0 or track_id is None:
                     continue
-                smooth_mask = gaussian_filter(mask, sigma=2)
-                # optimal_threshold = threshold_otsu(smooth_mask)
-                # # print('mask_max:', mask_max, 'mask_min:',mask_min, 'mask_mean:', mask_mean, 'optimal_threshold:',optimal_threshold)
-                # mask = smooth_mask > optimal_threshold
-                # Train
-                mask = smooth_mask>0.6
+
+                # Adaptive threshold
+                smooth_mask = gaussian_filter(mask, sigma=1)
+                # smooth_mask = apply_gaussian_filter(mask, sigma=1)
+                # Exclude zero values for thresholding calculation
+                # nonzero_mask_values = smooth_mask[smooth_mask > 0]
+                # if nonzero_mask_values.size > 0:
+                #     optimal_threshold = threshold_otsu(nonzero_mask_values)
+                # else:
+                #     # Default threshold if mask has no non-zero values
+                #     optimal_threshold = 0.5
                 
+                # # Apply threshold
+                # binary_mask = smooth_mask > optimal_threshold
+    
+                    
+                # Hard threshold
+                # mask = smooth_mask>0.3
+
+                # Train
+                # smooth_mask = gaussian_filter(mask, sigma=1)
+                # mask = smooth_mask>0.6
+                # mask = apply_adaptive_threshold(mask)
+
+                # # Train: Adaptive local threshold
+                # thresh_sauvola = threshold_sauvola(smooth_mask, window_size=25)
+                # valid_thresholds = thresh_sauvola[thresh_sauvola > 0.001] 
+
+                # if valid_thresholds.size > 0:
+                #     # If there are valid values, replace thresholds <= 0.001 with the minimum valid value
+                #     min_valid_value = np.min(valid_thresholds)  # ensure only valid values are considered
+                #     thresh_sauvola[thresh_sauvola <= 0.001] = min_valid_value
+                # else:
+                #     thresh_sauvola[:] = 0.6
+
+                # binary_mask = smooth_mask > thresh_sauvola
+                
+                # # Label connected components
+                # labeled_array, num_features = label(binary_mask)
+
+                # # Measure sizes of components
+                # sizes = np.bincount(labeled_array.ravel())
+                # mask_sizes = sizes > 1150  # 1080*1920
+                # # mask_sizes = sizes > 200  # 640*480
+                # mask_sizes[0] = 0  # Background size (zero) must not be removed
+
+                # # Apply the mask to the labeled array
+                # connected_component_mask = mask_sizes[labeled_array]
+                
+                # # Morphological opening and closing
+                # struct = generate_binary_structure(2, 1)
+                # opened_mask = binary_opening(connected_component_mask, structure=struct)
+                # mask = binary_closing(opened_mask, structure=struct)
+                
+                # Test: Adaptive local threshold
+                thresh_sauvola = threshold_sauvola(smooth_mask, window_size=25)
+                valid_thresholds = thresh_sauvola[thresh_sauvola > 0.1] 
+
+                if valid_thresholds.size > 0:
+                    # If there are valid values, replace thresholds <= 0.001 with the minimum valid value
+                    min_valid_value = np.min(valid_thresholds)  # ensure only valid values are considered
+                    thresh_sauvola[thresh_sauvola <= 0.1] = min_valid_value
+                else:
+                    thresh_sauvola[:] = 0.3
+
+                # binary_mask = smooth_mask > thresh_sauvola
+                binary_mask = smooth_mask > 0.3
+                
+                # Manual threshold onnected components
+                # labeled_array, num_features = label(binary_mask)
+                # sizes = np.bincount(labeled_array.ravel())
+                # mask_sizes = sizes > 1800  # 1080*1920
+                # # mask_sizes = sizes > 200  # 640*480
+                # mask_sizes[0] = 0  # Background size (zero) must not be removed
+                # connected_component_mask = mask_sizes[labeled_array]
+                
+                # Adaptive threshold onnected components
+                labeled_array, num_features = label(binary_mask)
+                component_slices = find_objects(labeled_array)
+                component_areas = [labeled_array[s].size for s in component_slices]
+                largest_component_index = np.argmax(component_areas) + 1  # +1 because labels start from 1
+                connected_component_mask = (labeled_array == largest_component_index)
+
+                # Morphological opening and closing
+                struct = generate_binary_structure(2, 2)
+                opened_mask = binary_opening(connected_component_mask, structure=struct)
+                mask = binary_closing(opened_mask, structure=struct)
+
+                
+                # plt.figure(figsize=(8, 7))
+                # plt.subplot(2, 2, 1)
+                # plt.imshow(binary_mask)
+                # plt.title('sauvola')
+                # plt.axis('off')
+                
+                
+                # plt.subplot(2, 2, 2)
+                # plt.imshow(connected_component_mask)
+                # plt.title('connected_component_mask')
+                # plt.axis('off')
+                
+                
+                # plt.subplot(2, 2, 3)
+                # plt.imshow(opened_mask)
+                # plt.title('opened_mask')
+                # plt.axis('off')
+                
+                # plt.subplot(2, 2, 4)
+                # plt.imshow(mask)
+                # plt.title('Connected Component')
+                # plt.axis('off')
+                
+                # plt.show()
                 
                 # Check for duplicates
-                is_duplicate = any(iou_mask(mask, pm) > threshold_iou for pm in processed_masks)
+                # is_duplicate = any(iou_mask(mask, pm) > threshold_iou for pm in processed_masks)
+                is_duplicate = any(safe_iou(mask, pm) > threshold_iou for pm in processed_masks)
                 if not is_duplicate:
                     processed_masks.append(mask)
                     class_id = 2
@@ -540,8 +669,8 @@ class Detector(object):
         # mask_statistics.to_csv(filename, index=False)
 
     def eval_seq(self):
-        data_root = os.path.join(self.args.mot_path, 'MOTS/train/images')
-        # data_root = os.path.join(self.args.mot_path, 'MOTS/test/images')
+        # data_root = os.path.join(self.args.mot_path, 'MOTS/train/images')
+        data_root = os.path.join(self.args.mot_path, 'MOTS/test/images')
         # print("Self.predict_path is:", self.predict_path)
         result_filename = os.path.join(self.predict_path, 'gt.txt')
         evaluator = Evaluator(data_root, self.seq_num)
@@ -562,8 +691,8 @@ class Detector(object):
             img_show = draw_bboxes(img_show, gt_boxes, identities=np.ones((len(gt_boxes), )) * -1)
         cv2.imwrite(img_path, img_show)
 
-    def detect(self, prob_threshold=0.7, area_threshold=100, vis=False):
-    # def detect(self, prob_threshold=0.8, area_threshold=100, vis=False):
+    # def detect(self, prob_threshold=0.6, area_threshold=100, vis=False):
+    def detect(self, prob_threshold=0.8, area_threshold=100, vis=False):
         total_dts = 0
         track_instances = None
         max_id = 0
@@ -571,6 +700,7 @@ class Detector(object):
             # img, targets = self.load_img_from_file(self.img_list[i])
             img= self.load_img_from_file(self.img_list[i])
             cur_img, ori_img = self.init_img(img)
+            # print('img:', ori_img.shape)
 
             # track_instances = None
             if track_instances is not None:
@@ -594,29 +724,31 @@ class Detector(object):
             
             total_dts += len(dt_instances)
 
-            if vis:
-                # for visual
-                cur_vis_img_path = os.path.join(self.save_path, 'frame_{}.jpg'.format(i))
-                gt_boxes = None
-                self.visualize_img_with_bbox(cur_vis_img_path, ori_img, dt_instances, ref_pts=all_ref_pts, gt_boxes=gt_boxes)
+            # if vis:
+            #     # for visual
+            #     cur_vis_img_path = os.path.join(self.save_path, 'frame_{}.jpg'.format(i))
+            #     gt_boxes = None
+            #     self.visualize_img_with_bbox(cur_vis_img_path, ori_img, dt_instances, ref_pts=all_ref_pts, gt_boxes=gt_boxes)
 
             tracker_outputs = self.tr_tracker.update(dt_instances)
             # print("tracker_outputs[:, 4:-2]:", tracker_outputs[:, 4:-2].shape, "tracker_outputs[:, :4]:", tracker_outputs[:, :4], "tracker_outputs[:, -1]:", tracker_outputs[:, -1])
             # For MOTS20-05 & MOTS20-06
-            # self.write_results(txt_path=os.path.join(self.predict_path, 'gt.txt'),
-            #                    mask_statistics = self.mask_statistics,
-            #                    frame_id=(i + 1),
-            #                    bbox_xyxy=tracker_outputs[:, :4],
-            #                    masks = tracker_outputs[:, 4:-2].reshape(-1, 480, 640) ,
-            #                    identities=tracker_outputs[:, -1])
-            
-            # For MOTS20-02/09/11
+            img_h , img_w = ori_img.shape[0], ori_img.shape[1]
             self.write_results(txt_path=os.path.join(self.predict_path, 'gt.txt'),
                                mask_statistics = self.mask_statistics,
                                frame_id=(i + 1),
                                bbox_xyxy=tracker_outputs[:, :4],
-                               masks = tracker_outputs[:, 4:-2].reshape(-1, 1080, 1920) ,
+                               #    masks = tracker_outputs[:, 4:-2].reshape(-1, 480, 640) ,
+                               masks = tracker_outputs[:, 4:-2].reshape(-1, img_h , img_w) ,
                                identities=tracker_outputs[:, -1])
+            
+            # For MOTS20-02/09/11
+            # self.write_results(txt_path=os.path.join(self.predict_path, 'gt.txt'),
+            #                    mask_statistics = self.mask_statistics,
+            #                    frame_id=(i + 1),
+            #                    bbox_xyxy=tracker_outputs[:, :4],
+            #                    masks = tracker_outputs[:, 4:-2].reshape(-1, 1080, 1920) ,
+            #                    identities=tracker_outputs[:, -1])
         print("totally {} dts max_id={}".format(total_dts, max_id))
 
 
@@ -637,12 +769,14 @@ if __name__ == '__main__':
     # seq_nums = ['MOTS20-05']
     # seq_nums = ['MOTS20-06']
     
-    seq_nums = ['MOTS20-02',
-                'MOTS20-09',
-                'MOTS20-11',]
-    # seq_nums = ['MOTS20-01',
-    #             'MOTS20-07',
-    #             'MOTS20-12',]
+    # seq_nums = ['MOTS20-02',
+    #             # 'MOTS20-05',
+    #             'MOTS20-09',
+    #             'MOTS20-11',]
+    seq_nums = ['MOTS20-01',
+                # 'MOTS20-06',
+                'MOTS20-07',
+                'MOTS20-12',]
    
 
 
