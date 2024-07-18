@@ -312,12 +312,12 @@ class Detector(object):
         self.detr = model
 
         self.seq_num = seq_num
-        # img_list = os.listdir(os.path.join(self.args.mot_path, 'MOTS/train/images', self.seq_num, 'img1'))
-        # img_list = [os.path.join(self.args.mot_path, 'MOTS/train/images', self.seq_num, 'img1', _) for _ in img_list if
-        #             ('jpg' in _) or ('png' in _)]
-        img_list = os.listdir(os.path.join(self.args.mot_path, 'MOTS/test/images', self.seq_num, 'img1'))
-        img_list = [os.path.join(self.args.mot_path, 'MOTS/test/images', self.seq_num, 'img1', _) for _ in img_list if
+        img_list = os.listdir(os.path.join(self.args.mot_path, 'MOTS/train/images', self.seq_num, 'img1'))
+        img_list = [os.path.join(self.args.mot_path, 'MOTS/train/images', self.seq_num, 'img1', _) for _ in img_list if
                     ('jpg' in _) or ('png' in _)]
+        # img_list = os.listdir(os.path.join(self.args.mot_path, 'MOTS/test/images', self.seq_num, 'img1'))
+        # img_list = [os.path.join(self.args.mot_path, 'MOTS/test/images', self.seq_num, 'img1', _) for _ in img_list if
+        #             ('jpg' in _) or ('png' in _)]
 
         self.img_list = sorted(img_list)
         self.img_len = len(self.img_list)
@@ -611,10 +611,14 @@ class Detector(object):
                 # Adaptive threshold onnected components
                 labeled_array, num_features = label(binary_mask)
                 component_slices = find_objects(labeled_array)
-                component_areas = [labeled_array[s].size for s in component_slices]
-                largest_component_index = np.argmax(component_areas) + 1  # +1 because labels start from 1
-                connected_component_mask = (labeled_array == largest_component_index)
-
+                # component_areas = [labeled_array[s].size for s in component_slices]
+                component_areas = np.bincount(labeled_array.ravel())[1:]
+                if component_areas.size > 0:
+                    largest_component_index = np.argmax(component_areas) + 1  # +1 because labels start from 1
+                    connected_component_mask = (labeled_array == largest_component_index)
+                else:
+                    connected_component_mask = binary_mask
+                    
                 # Morphological opening and closing
                 struct = generate_binary_structure(2, 2)
                 opened_mask = binary_opening(connected_component_mask, structure=struct)
@@ -669,8 +673,8 @@ class Detector(object):
         # mask_statistics.to_csv(filename, index=False)
 
     def eval_seq(self):
-        # data_root = os.path.join(self.args.mot_path, 'MOTS/train/images')
-        data_root = os.path.join(self.args.mot_path, 'MOTS/test/images')
+        data_root = os.path.join(self.args.mot_path, 'MOTS/train/images')
+        # data_root = os.path.join(self.args.mot_path, 'MOTS/test/images')
         # print("Self.predict_path is:", self.predict_path)
         result_filename = os.path.join(self.predict_path, 'gt.txt')
         evaluator = Evaluator(data_root, self.seq_num)
@@ -738,7 +742,6 @@ class Detector(object):
                                mask_statistics = self.mask_statistics,
                                frame_id=(i + 1),
                                bbox_xyxy=tracker_outputs[:, :4],
-                               #    masks = tracker_outputs[:, 4:-2].reshape(-1, 480, 640) ,
                                masks = tracker_outputs[:, 4:-2].reshape(-1, img_h , img_w) ,
                                identities=tracker_outputs[:, -1])
             
@@ -769,14 +772,14 @@ if __name__ == '__main__':
     # seq_nums = ['MOTS20-05']
     # seq_nums = ['MOTS20-06']
     
-    # seq_nums = ['MOTS20-02',
-    #             # 'MOTS20-05',
-    #             'MOTS20-09',
-    #             'MOTS20-11',]
-    seq_nums = ['MOTS20-01',
-                # 'MOTS20-06',
-                'MOTS20-07',
-                'MOTS20-12',]
+    seq_nums = ['MOTS20-02',
+                'MOTS20-05',
+                'MOTS20-09',
+                'MOTS20-11',]
+    # seq_nums = ['MOTS20-01',
+    #             'MOTS20-06',
+    #             'MOTS20-07',
+    #             'MOTS20-12',]
    
 
 
