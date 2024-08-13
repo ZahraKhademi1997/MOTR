@@ -41,6 +41,7 @@ from pathlib import Path
 from torch.nn.init import xavier_uniform_
 import torch.nn.init as init
 from util.FPN_encoder import FPNEncoder
+from util.misc import inverse_sigmoid
 
 class ClipMatcher(SetCriterion):
     def __init__(self, num_classes,
@@ -403,7 +404,7 @@ class ClipMatcher(SetCriterion):
         track_instances: Instances = outputs_without_aux['track_instances']
         pred_logits_i = track_instances.pred_logits  # predicted logits of i-th image.
         pred_boxes_i = track_instances.pred_boxes  # predicted boxes of i-th image.
-        print('pred_boxes_i in MOTR:', torch.isnan(pred_boxes_i).any())
+        assert not torch.isnan(pred_boxes_i).any(), "NaN found in pred_boxes_i in MOTR"
         
         # (11) Adding pred_masks
         pred_masks_i = track_instances.pred_masks  # predicted masks of i-th image.
@@ -477,7 +478,7 @@ class ClipMatcher(SetCriterion):
             # (14) Adding pred_masks
             'pred_masks': track_instances.pred_masks[unmatched_track_idxes].unsqueeze(0),
         }
-        print('unmatched_outputs in MOTR:', torch.isnan(unmatched_outputs['pred_boxes']).any())
+        assert not torch.isnan(unmatched_outputs['pred_boxes']).any(), "NaN found in unmatched_outputs[pred_boxes] in MOTR"
 
         new_matched_indices = match_for_single_decoder_layer(unmatched_outputs, self.matcher)
 
@@ -488,7 +489,7 @@ class ClipMatcher(SetCriterion):
         # step6. calculate iou.
         active_idxes = (track_instances.obj_idxes >= 0) & (track_instances.matched_gt_idxes >= 0)
         active_track_boxes = track_instances.pred_boxes[active_idxes]
-        print('active track boxes in MOTR:', torch.isnan(active_track_boxes).any())
+        assert not torch.isnan(active_track_boxes).any(), "NaN found in active_track_boxes in MOTR"
 
         
         if len(active_track_boxes) > 0:
@@ -521,6 +522,7 @@ class ClipMatcher(SetCriterion):
                 if i == 1:
                     fig, axes = plt.subplots(1, 2, figsize=(12, 6))
                     if i < num_active:
+                        # print('active_predicted_boxes[i]:', active_predicted_boxes[i])
                         x1_p, y1_p, x2_p, y2_p = active_predicted_boxes[i]
                         mask_height_p, mask_width_p = active_predictions[i].shape[0] , active_predictions[i].shape[1]
                         # print('x1_p:', x1_p, 'y1_p:', y1_p, 'x2_p:', x2_p, 'y2_p:', y2_p) # x1_p: tensor(0.7680) y1_p: tensor(0.0493) x2_p: tensor(0.7896) y2_p: tensor(0.0750)
@@ -763,7 +765,7 @@ def _get_clones(module, N):
 
 class MOTR(nn.Module):
     def __init__(self, backbone, transformer, num_classes, num_queries, num_feature_levels, criterion, track_embed, num_seg_fcs, mask_positional_encoding_cfg={'type': 'RelSinePositionalEncoding', 'num_feats': 128, 'normalize': True},
-                 aux_loss=True, with_box_refine=False, two_stage=False, memory_bank=None, use_checkpoint=False):
+                 aux_loss=True, with_box_refine=False, two_stage=False, memory_bank=None, use_checkpoint=False, initial_pred=True):
         """ Initializes the model.
         Parameters:
             backbone: torch module of the backbone to be used. See backbone.py
@@ -858,14 +860,19 @@ class MOTR(nn.Module):
             hidden_dim,
             norm = None) # Initialized
         
+        
+        # Mask prediction
+        self.forward_prediction_heads = self.transformer.forward_prediction_heads
+        self.dn_post_process = self.transformer.dn_post_process
+        
         # self.FPNEncoder = FPNEncoder(
         #     backbone.output_shape(), 
         #     hidden_dim, 
         #     hidden_dim,
         #     norm = None) # Initialized
         
-        # self.AxialBlock = AxialBlock(hidden_dim,hidden_dim // 2) # Initialized
-        
+        self.AxialBlock = AxialBlock(hidden_dim,hidden_dim // 2) # Initialized
+        self.initial_pred = initial_pred
         # seg_branch without iniliazing
         # seg_branch = []
         # for _ in range(self.num_seg_fcs):
@@ -905,21 +912,52 @@ class MOTR(nn.Module):
         self.memory_bank = memory_bank
         self.mem_bank_len = 0 if memory_bank is None else memory_bank.max_his_length
         
+    def pred_box(self, reference, hs, ref0=None):
+        """
+        :param reference: reference box coordinates from each decoder layer
+        :param hs: content
+        :param ref0: whether there are prediction from the first layer
+        """
+        device = reference[0].device
+        
+        if ref0 is None:
+            outputs_coord_list = []
+        else:
+            outputs_coord_list = [ref0.to(device)]
+        for dec_lid, (layer_ref_sig, layer_bbox_embed, layer_hs) in enumerate(zip(reference[:-1], self.bbox_embed, hs)):
+            assert not torch.isnan(layer_ref_sig).any(), "NaN values detected in layer_ref_sig in pred_box."
+            assert not torch.isnan(layer_hs).any(), "NaN values detected in layer_hs in pred_box."
+
+            layer_delta_unsig = layer_bbox_embed(layer_hs).to(device)
+            assert not torch.isnan(inverse_sigmoid(layer_ref_sig)).any(), "NaN values detected in inverse_sigmoid(layer_ref_sig) in pred_box."
+            layer_outputs_unsig = layer_delta_unsig + inverse_sigmoid(layer_ref_sig).to(device)
+            layer_outputs_unsig = layer_outputs_unsig.sigmoid()
+            assert not torch.isnan(layer_outputs_unsig).any(), "NaN values detected in layer_outputs_unsig in pred_box."
+            outputs_coord_list.append(layer_outputs_unsig)
+        outputs_coord_list = torch.stack(outputs_coord_list)
+        return outputs_coord_list
+        
+        
+        
     def _generate_empty_tracks(self, frame_shape, device):
         track_instances = Instances((1, 1))
         
         # num_queries, dim = self.query_embed.weight.shape  # (300, 512)
-        num_queries = self.transformer.get_value()
-        # num_queries = 300
+        # num_queries = self.transformer.get_value()
         dim = 512
         
-        # device = self.query_embed.weight.device
-        # print('self.trasnformer.tgt.shape:', self.transformer.get_value())
-        # device = 'cuda'
         
         # track_instances.ref_pts = self.transformer.reference_points(self.query_embed.weight[:, :dim // 2])
         # track_instances.query_pos = self.query_embed.weight
-        track_instances.output_embedding = torch.zeros((num_queries, dim >> 1), device=device)
+        # track_instances.query_pos = self.transformer.query_feat.weight
+        
+        # assert track_instances.query_pos.shape[0] == 300, "track_instances.query_pos in generate function must have exactly 300 elements, but got {}".format(track_instances.query_pos.shape[0])
+        track_instances.output_embedding = torch.zeros((num_queries, dim >> 1), device=device) # It should be updated based on the num_queries (track+detect)
+        # assert track_instances.output_embedding.shape[0] == 300, "track_instances.output_embedding in generate function must have exactly 300 elements, but got {}".format(track_instances.output_embedding.shape[0])
+
+        # print('track_instances.query_pos:', track_instances.query_pos.shape, 'track_instances.output_embedding:', track_instances.output_embedding.shape)
+        # assert len(track_instances) == 300, "len(track_instances) must have exactly 300 elements, but got {}".format(len(track_instances))
+
         track_instances.obj_idxes = torch.full((len(track_instances),), -1, dtype=torch.long, device=device)
         track_instances.matched_gt_idxes = torch.full((len(track_instances),), -1, dtype=torch.long, device=device)
         track_instances.disappear_time = torch.zeros((len(track_instances), ), dtype=torch.long, device=device)
@@ -930,7 +968,8 @@ class MOTR(nn.Module):
         track_instances.iou_masks = torch.zeros((len(track_instances),), dtype=torch.float, device=device)
         
         track_instances.scores = torch.zeros((len(track_instances),), dtype=torch.float, device=device)
-        track_instances.track_scores = torch.zeros((len(track_instances),), dtype=torch.float, device=device)
+        # track_instances.scores = torch.zeros((300,), dtype=torch.float, device=device)
+        # assert track_instances.scores.shape[0] == 300, "track_instances.scores in generate function must have exactly 300 elements, but got {}".format(track_instances.scores.shape[0])
         track_instances.pred_boxes = torch.zeros((len(track_instances), 4), dtype=torch.float, device=device)
         
         # (4) Initializing pred_masks in track_instances dictionary
@@ -955,12 +994,28 @@ class MOTR(nn.Module):
         self.track_base.clear()
 
     @torch.jit.unused
-    def _set_aux_loss(self, outputs_class, outputs_coord):
+    # def _set_aux_loss(self, outputs_class, outputs_coord):
+    #     # this is a workaround to make torchscript happy, as torchscript
+    #     # doesn't support dictionary with non-homogeneous values, such
+    #     # as a dict having both a Tensor and a list.
+    #     return [{'pred_logits': a, 'pred_boxes': b}
+    #             for a, b in zip(outputs_class[:-1], outputs_coord[:-1])]
+    
+    def _set_aux_loss(self, outputs_class, outputs_seg_masks, out_boxes=None):
         # this is a workaround to make torchscript happy, as torchscript
         # doesn't support dictionary with non-homogeneous values, such
         # as a dict having both a Tensor and a list.
-        return [{'pred_logits': a, 'pred_boxes': b}
-                for a, b in zip(outputs_class[:-1], outputs_coord[:-1])]
+        # if self.mask_classification:
+        if out_boxes is None:
+            return [
+                {"pred_logits": a, "pred_masks": b}
+                for a, b in zip(outputs_class[:-1], outputs_seg_masks[:-1])
+            ]
+        else:
+            return [
+                {"pred_logits": a, "pred_masks": b, "pred_boxes":c}
+                for a, b, c in zip(outputs_class[:-1], outputs_seg_masks[:-1], out_boxes[:-1])
+            ]
 
     def _forward_single_image(self, samples, targets, track_instances: Instances):
         
@@ -1058,9 +1113,35 @@ class MOTR(nn.Module):
         # for src in srcs:
         #     print('src shape:', src.shape) # src shape: torch.Size([1, 256, 84, 117]), torch.Size([1, 256, 42, 59]), torch.Size([1, 256, 21, 30]), torch.Size([1, 256, 11, 15])
         
-    
         # hs, init_reference, inter_references, enc_outputs_class, enc_outputs_coord_unact, memory, multi_level_memory, out_interm, mask_dict = self.transformer(srcs, masks, pos,  targets, ref_pts=None)
-        hs, init_reference, inter_references,out, mask_dict = self.transformer(srcs, masks, pos, embeddings,  targets, ref_pts=None)
+        # hs, init_reference, inter_references, out, mask_dict = self.transformer(srcs, masks, pos, embeddings,  targets, ref_pts=None)
+        hs, init_reference, inter_references, mask_dict, predictions_class, predictions_mask, interm_outputs = self.transformer(srcs, masks, pos, embeddings,  targets, ref_pts=None)
+        
+        
+        for i, output in enumerate(hs):
+            outputs_class, outputs_mask = self.forward_prediction_heads(output.transpose(0, 1), embeddings, self.training or (i == len(hs)-1))
+            predictions_class.append(outputs_class)
+            predictions_mask.append(outputs_mask)
+
+        # iteratively box prediction
+        if self.initial_pred:
+            out_boxes = self.pred_box(inter_references, hs, init_reference.sigmoid())
+            assert not torch.isnan(out_boxes).any(), "NaN values detected in out_boxes in initial_pred if."
+            # assert len(predictions_class) == self.num_decoder_layers + 1
+        else:
+            out_boxes = self.pred_box(inter_references, hs)
+            assert not torch.isnan(out_boxes).any(), "NaN values detected in out_boxes in initial_pred else."
+            
+        if mask_dict is not None:
+            predictions_mask=torch.stack(predictions_mask)
+            predictions_class=torch.stack(predictions_class)
+            predictions_class, out_boxes,predictions_mask=\
+                self.dn_post_process(predictions_class,out_boxes,mask_dict,predictions_mask) # Removing the denoising part
+            predictions_class,predictions_mask=list(predictions_class),list(predictions_mask)
+            
+        predictions_class[-1] = predictions_class[-1] + 0.0*self.transformer.label_enc.weight.sum()
+        assert not torch.isnan(out_boxes[-1]).any(), "NaN values detected in out_boxes[-1]."
+        
         
         hs  = torch.cat(hs, dim=0).unsqueeze(1)
         inter_references = torch.cat(inter_references, dim=0).unsqueeze(1)
@@ -1078,40 +1159,52 @@ class MOTR(nn.Module):
                 assert reference.shape[-1] == 2
                 tmp[..., :2] += reference
             
-        
-        # print('outputs_class:', outputs_class.shape, 'outputs_coord:', outputs_coord.shape, 'outputs_dynamic_params:', outputs_dynamic_params.shape, 'init_reference:', init_reference.shape, 'inter_references:', inter_references.shape, 'inter_references[:, :, :,:2]:', 'init_reference[None]:', init_reference[None].shape, inter_references[:, :,:, :2].shape)
         ref_pts_all = torch.cat([init_reference[None][:, :, :, -2:], inter_references[:, :, :, :2]], dim=0)
     
         
         # out = {'pred_logits': out_interm["pred_logits"], 'pred_boxes': out_interm["pred_boxes"], 'ref_pts': ref_pts_all[5], 'pred_masks': out_interm["pred_masks"]}
-        print('out boxes in MOTR:', torch.isnan(out["pred_boxes"]).any())
-
+        
+        out = {
+            'pred_logits': predictions_class[-1],
+            'pred_masks': predictions_mask[-1],
+            'pred_boxes':out_boxes[-1],
+            'aux_outputs': self._set_aux_loss(
+                predictions_class , predictions_mask, out_boxes
+            )
+        }
+        out['ref_pts'] =  ref_pts_all[5]
+        out['interm_outputs'] = interm_outputs
+        
         # if self.aux_loss:
         #     out['aux_outputs'] = self._set_aux_loss(out["pred_logits"], out["pred_boxes"])
         # out['hs'] = hs[-1]
-        out['ref_pts'] =  ref_pts_all[5]
+        
         # print('out_interm[pred_logits]:', out_interm["pred_logits"].shape, "out_interm[pred_boxes]:", out_interm["pred_boxes"].shape, 'hs[-1]:', hs[-1].shape)
-       
+        # print('out[pred_logits]:', out["pred_logits"].shape)
+        # assert out["pred_logits"].shape[1] == 300, "logits must have exactly 300 elements, but got {}".format(out["pred_logits"].shape[1])
         return out, mask_dict
     
     
     def _post_process_single_image(self, frame_res, track_instances, frame_shape, mask_dict, is_last): 
-        # print("Frame shape received:", frame_shape)              
+        # assert len(track_instances) == 300, "len(track_instances) in ppsi must have exactly 300 elements, but got {}".format(len(track_instances))             
         with torch.no_grad():
             if self.training:
                 track_scores = frame_res['pred_logits'][0, :].sigmoid().max(dim=-1).values
             else:
                 track_scores = frame_res['pred_logits'][0, :, 0].sigmoid()
-        
+        assert track_scores.shape[0] == 300, "track_scores must have exactly 300 elements, but got {}".format(track_scores.shape[0])
+        assert track_instances.scores.shape[0] == 300, "track_instances.scores must have exactly 300 elements, but got {}".format(track_instances.scores.shape[0])
         pred_masks = frame_res['pred_masks'][0]
+        
         # print('pred_masks:', pred_masks.shape)
         # max_h, max_w = frame_shape[0], frame_shape[1]
         # pred_masks_interpolated = torch.nn.functional.interpolate(pred_masks.unsqueeze(0), size=(max_h, max_w), mode='nearest').squeeze(0)
         # print('track_score:', track_scores.shape, 'frame_res[pred_logits][0]:', frame_res['pred_logits'][0].shape, 'frame_res[pred_logits][0]:', frame_res['pred_logits'][0].shape, 'frame_res[hs][0]:', frame_res['hs'][0].shape)   
+        # print('track_instances.scores:', track_instances.scores.shape, 'track_scores:', track_scores.shape)
         track_instances.scores = track_scores
         track_instances.pred_logits = frame_res['pred_logits'][0]
         track_instances.pred_boxes = frame_res['pred_boxes'][0]
-        print('track_instances.pred_boxes in MOTR:', torch.isnan(track_instances.pred_boxes).any())
+        assert not torch.isnan(track_instances.pred_boxes).any(), "NaN found in track_instances.pred_boxes in MOTR"
 
         
         # (10) Adding pred_masks
@@ -1203,8 +1296,6 @@ class MOTR(nn.Module):
         if self.training:
             self.criterion.initialize_for_single_clip(data['gt_instances'])
         
-        query_shape = self.transformer.get_value()
-        # print('query_shape:', query_shape)
         targets = data['gt_instances']
         frames = data['imgs']  # list of Tensor.
         device = frames[0].device
@@ -1212,8 +1303,6 @@ class MOTR(nn.Module):
         # (6) Calculating masks attribute for each image for _generate_empty_tracks function
         self.mask_height , self.mask_width = frames[0].shape[1] , frames[0].shape[2]
         frames_shape = (self.mask_height , self.mask_width)
-        # print('frames_shape:', frames_shape)
-        
         
         outputs = {
             'pred_logits': [],
@@ -1264,6 +1353,7 @@ class MOTR(nn.Module):
             else:
                 frame = nested_tensor_from_tensor_list([frame])
                 frame_res, mask_dict = self._forward_single_image(frame, target, track_instances)
+            # assert track_instances.scores.shape[0] == 300, "track_instances.scores in Forward must have exactly 300 elements, but got {}".format(track_instances.scores.shape[0])
             frame_res = self._post_process_single_image(frame_res, track_instances, frame_shape, mask_dict,is_last)
             # print('frame_res:', frame_res)
             
@@ -1406,6 +1496,7 @@ def build(args):
     
     dn_losses = []
     dn = "yes"
+    initial_pred = True
 
     criterion = ClipMatcher(num_classes, matcher=img_matcher, weight_dict=weight_dict, losses=losses, num_points = num_points, oversample_ratio = oversample_ratio, importance_sample_ratio = importance_sample_ratio, dn_losses = dn_losses, dn = dn)
     criterion.to(device)
@@ -1424,5 +1515,6 @@ def build(args):
         two_stage=args.two_stage,
         memory_bank=memory_bank,
         use_checkpoint=args.use_checkpoint,
+        initial_pred =initial_pred,
     )
     return model, criterion, postprocessors
