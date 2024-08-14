@@ -43,6 +43,7 @@ import torch.nn.init as init
 from util.FPN_encoder import FPNEncoder
 from util.misc import inverse_sigmoid
 
+
 class ClipMatcher(SetCriterion):
     def __init__(self, num_classes,
                         matcher,
@@ -139,6 +140,16 @@ class ClipMatcher(SetCriterion):
         """
         # We ignore the regression loss of the track-disappear slots.
         #TODO: Make this filter process more elegant.
+        
+        assert all(len(gt) > 0 for gt in gt_instances), "Empty ground truth instances."
+        assert all(isinstance(ind, tuple) and len(ind) == 2 for ind in indices), "Indices format is incorrect."
+        
+        for i, (src_per_img, tgt_per_img) in enumerate(indices):
+            assert src_per_img.max() < outputs['pred_logits'][i].shape[0], "Source index out of bounds."
+            assert tgt_per_img.max() < len(gt_instances[i]), "Target index out of bounds."
+            assert not torch.any(tgt_per_img == -1), "Unexpected -1 in target indices."
+        
+    
         filtered_idx = []
         for src_per_img, tgt_per_img in indices:
             keep = tgt_per_img != -1
@@ -558,7 +569,7 @@ class ClipMatcher(SetCriterion):
         active_track_masks_primarly = track_instances.pred_masks[active_idxes]
         if len(active_track_masks_primarly) > 0: 
             gt_masks = gt_instances_i.masks[track_instances.matched_gt_idxes[active_idxes]].float()
-            plot_and_save_masks(active_idxes, track_instances.pred_masks, gt_masks, gt_boxes, active_track_boxes, '/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR_mask_DN_DAB/output/criterion')
+            plot_and_save_masks(active_idxes, track_instances.pred_masks, gt_masks, gt_boxes, active_track_boxes, '/home/zahra/Documents/Projects/prototype/MOTR-codes/DN-DBA-MOTR-Mask/output/criterion')
 
         # active_track_masks = active_track_masks.sigmoid()
         # step7. merge the unmatched pairs and the matched pairs.
@@ -871,8 +882,10 @@ class MOTR(nn.Module):
         #     hidden_dim,
         #     norm = None) # Initialized
         
-        self.AxialBlock = AxialBlock(hidden_dim,hidden_dim // 2) # Initialized
+        # self.AxialBlock = AxialBlock(hidden_dim,hidden_dim // 2) # Initialized
         self.initial_pred = initial_pred
+        
+        
         # seg_branch without iniliazing
         # seg_branch = []
         # for _ in range(self.num_seg_fcs):
@@ -939,17 +952,68 @@ class MOTR(nn.Module):
         
         
         
+    # def _generate_empty_tracks(self, frame_shape, device):
+    #     track_instances = Instances((1, 1))
+        
+    #     # num_queries, dim = self.query_embed.weight.shape  # (300, 512)
+    #     num_queries = self.transformer.get_value()
+    #     dim = 512
+        
+        
+    #     # track_instances.ref_pts = self.transformer.reference_points(self.query_embed.weight[:, :dim // 2])
+    #     # track_instances.query_pos = self.query_embed.weight
+    #     track_instances.query_pos = self.transformer.tr_queries
+        
+    #     # assert track_instances.query_pos.shape[0] == 300, "track_instances.query_pos in generate function must have exactly 300 elements, but got {}".format(track_instances.query_pos.shape[0])
+    #     track_instances.output_embedding = torch.zeros((num_queries, dim >> 1), device=device) # It should be updated based on the num_queries (track+detect)
+    #     # assert track_instances.output_embedding.shape[0] == 300, "track_instances.output_embedding in generate function must have exactly 300 elements, but got {}".format(track_instances.output_embedding.shape[0])
+
+    #     # print('track_instances.query_pos:', track_instances.query_pos.shape, 'track_instances.output_embedding:', track_instances.output_embedding.shape)
+    #     # assert len(track_instances) == 300, "len(track_instances) must have exactly 300 elements, but got {}".format(len(track_instances))
+
+    #     track_instances.obj_idxes = torch.full((len(track_instances),), -1, dtype=torch.long, device=device)
+    #     track_instances.matched_gt_idxes = torch.full((len(track_instances),), -1, dtype=torch.long, device=device)
+    #     track_instances.disappear_time = torch.zeros((len(track_instances), ), dtype=torch.long, device=device)
+        
+    #     # (16) Adding part to handle iou from masks and boxes
+    #     # track_instances.iou = torch.zeros((len(track_instances),), dtype=torch.float, device=device)
+    #     track_instances.iou_boxes = torch.zeros((len(track_instances),), dtype=torch.float, device=device)
+    #     track_instances.iou_masks = torch.zeros((len(track_instances),), dtype=torch.float, device=device)
+        
+    #     track_instances.scores = torch.zeros((len(track_instances),), dtype=torch.float, device=device)
+    #     # track_instances.scores = torch.zeros((300,), dtype=torch.float, device=device)
+    #     # assert track_instances.scores.shape[0] == 300, "track_instances.scores in generate function must have exactly 300 elements, but got {}".format(track_instances.scores.shape[0])
+    #     track_instances.pred_boxes = torch.zeros((len(track_instances), 4), dtype=torch.float, device=device)
+        
+    #     # (4) Initializing pred_masks in track_instances dictionary
+    #     # height = self.mask_height
+    #     # width = self.mask_width
+    #     # with torch.no_grad():
+    #     height = frame_shape[0]
+    #     width = frame_shape[1]
+    #     track_instances.pred_masks = torch.zeros((len(track_instances), height, width), dtype=torch.float, device=device)
+        
+    #     track_instances.pred_logits = torch.zeros((len(track_instances), self.num_classes), dtype=torch.float, device=device)
+        
+    #     mem_bank_len = self.mem_bank_len
+    #     track_instances.mem_bank = torch.zeros((len(track_instances), mem_bank_len, dim // 2), dtype=torch.float32, device=device)
+    #     track_instances.mem_padding_mask = torch.ones((len(track_instances), mem_bank_len), dtype=torch.bool, device=device)
+    #     track_instances.save_period = torch.zeros((len(track_instances), ), dtype=torch.float32, device=device)
+
+    #     # return track_instances.to(self.query_embed.weight.device)
+    #     return track_instances.to(device)
+    
     def _generate_empty_tracks(self, frame_shape, device):
         track_instances = Instances((1, 1))
         
         # num_queries, dim = self.query_embed.weight.shape  # (300, 512)
-        # num_queries = self.transformer.get_value()
+        num_queries = self.transformer.get_value()
         dim = 512
-        
         
         # track_instances.ref_pts = self.transformer.reference_points(self.query_embed.weight[:, :dim // 2])
         # track_instances.query_pos = self.query_embed.weight
-        # track_instances.query_pos = self.transformer.query_feat.weight
+        track_instances.query_pos = self.transformer.init_det
+        # print('track_instances.query_pos:', track_instances.query_pos)
         
         # assert track_instances.query_pos.shape[0] == 300, "track_instances.query_pos in generate function must have exactly 300 elements, but got {}".format(track_instances.query_pos.shape[0])
         track_instances.output_embedding = torch.zeros((num_queries, dim >> 1), device=device) # It should be updated based on the num_queries (track+detect)
@@ -958,19 +1022,19 @@ class MOTR(nn.Module):
         # print('track_instances.query_pos:', track_instances.query_pos.shape, 'track_instances.output_embedding:', track_instances.output_embedding.shape)
         # assert len(track_instances) == 300, "len(track_instances) must have exactly 300 elements, but got {}".format(len(track_instances))
 
-        track_instances.obj_idxes = torch.full((len(track_instances),), -1, dtype=torch.long, device=device)
-        track_instances.matched_gt_idxes = torch.full((len(track_instances),), -1, dtype=torch.long, device=device)
-        track_instances.disappear_time = torch.zeros((len(track_instances), ), dtype=torch.long, device=device)
+        track_instances.obj_idxes = torch.full((num_queries,), -1, dtype=torch.long, device=device)
+        track_instances.matched_gt_idxes = torch.full((num_queries,), -1, dtype=torch.long, device=device)
+        track_instances.disappear_time = torch.zeros((num_queries, ), dtype=torch.long, device=device)
         
         # (16) Adding part to handle iou from masks and boxes
         # track_instances.iou = torch.zeros((len(track_instances),), dtype=torch.float, device=device)
-        track_instances.iou_boxes = torch.zeros((len(track_instances),), dtype=torch.float, device=device)
-        track_instances.iou_masks = torch.zeros((len(track_instances),), dtype=torch.float, device=device)
+        track_instances.iou_boxes = torch.zeros((num_queries,), dtype=torch.float, device=device)
+        track_instances.iou_masks = torch.zeros((num_queries,), dtype=torch.float, device=device)
         
-        track_instances.scores = torch.zeros((len(track_instances),), dtype=torch.float, device=device)
+        track_instances.scores = torch.zeros((num_queries,), dtype=torch.float, device=device)
         # track_instances.scores = torch.zeros((300,), dtype=torch.float, device=device)
         # assert track_instances.scores.shape[0] == 300, "track_instances.scores in generate function must have exactly 300 elements, but got {}".format(track_instances.scores.shape[0])
-        track_instances.pred_boxes = torch.zeros((len(track_instances), 4), dtype=torch.float, device=device)
+        track_instances.pred_boxes = torch.zeros((num_queries, 4), dtype=torch.float, device=device)
         
         # (4) Initializing pred_masks in track_instances dictionary
         # height = self.mask_height
@@ -978,14 +1042,14 @@ class MOTR(nn.Module):
         # with torch.no_grad():
         height = frame_shape[0]
         width = frame_shape[1]
-        track_instances.pred_masks = torch.zeros((len(track_instances), height, width), dtype=torch.float, device=device)
+        track_instances.pred_masks = torch.zeros((num_queries, height, width), dtype=torch.float, device=device)
         
-        track_instances.pred_logits = torch.zeros((len(track_instances), self.num_classes), dtype=torch.float, device=device)
+        track_instances.pred_logits = torch.zeros((num_queries, self.num_classes), dtype=torch.float, device=device)
         
         mem_bank_len = self.mem_bank_len
-        track_instances.mem_bank = torch.zeros((len(track_instances), mem_bank_len, dim // 2), dtype=torch.float32, device=device)
-        track_instances.mem_padding_mask = torch.ones((len(track_instances), mem_bank_len), dtype=torch.bool, device=device)
-        track_instances.save_period = torch.zeros((len(track_instances), ), dtype=torch.float32, device=device)
+        track_instances.mem_bank = torch.zeros((num_queries, mem_bank_len, dim // 2), dtype=torch.float32, device=device)
+        track_instances.mem_padding_mask = torch.ones((num_queries, mem_bank_len), dtype=torch.bool, device=device)
+        track_instances.save_period = torch.zeros((num_queries, ), dtype=torch.float32, device=device)
 
         # return track_instances.to(self.query_embed.weight.device)
         return track_instances.to(device)
@@ -1115,7 +1179,8 @@ class MOTR(nn.Module):
         
         # hs, init_reference, inter_references, enc_outputs_class, enc_outputs_coord_unact, memory, multi_level_memory, out_interm, mask_dict = self.transformer(srcs, masks, pos,  targets, ref_pts=None)
         # hs, init_reference, inter_references, out, mask_dict = self.transformer(srcs, masks, pos, embeddings,  targets, ref_pts=None)
-        hs, init_reference, inter_references, mask_dict, predictions_class, predictions_mask, interm_outputs = self.transformer(srcs, masks, pos, embeddings,  targets, ref_pts=None)
+
+        hs, init_reference, inter_references, mask_dict, predictions_class, predictions_mask, interm_outputs = self.transformer(srcs, masks, pos, embeddings,  targets, track_instances.query_pos, ref_pts=None)
         
         
         for i, output in enumerate(hs):
@@ -1192,15 +1257,14 @@ class MOTR(nn.Module):
                 track_scores = frame_res['pred_logits'][0, :].sigmoid().max(dim=-1).values
             else:
                 track_scores = frame_res['pred_logits'][0, :, 0].sigmoid()
-        assert track_scores.shape[0] == 300, "track_scores must have exactly 300 elements, but got {}".format(track_scores.shape[0])
-        assert track_instances.scores.shape[0] == 300, "track_instances.scores must have exactly 300 elements, but got {}".format(track_instances.scores.shape[0])
+        # assert track_scores.shape[0] == 300, "track_scores must have exactly 300 elements, but got {}".format(track_scores.shape[0])
+        # assert track_instances.scores.shape[0] == 300, "track_instances.scores must have exactly 300 elements, but got {}".format(track_instances.scores.shape[0])
         pred_masks = frame_res['pred_masks'][0]
         
-        # print('pred_masks:', pred_masks.shape)
         # max_h, max_w = frame_shape[0], frame_shape[1]
         # pred_masks_interpolated = torch.nn.functional.interpolate(pred_masks.unsqueeze(0), size=(max_h, max_w), mode='nearest').squeeze(0)
         # print('track_score:', track_scores.shape, 'frame_res[pred_logits][0]:', frame_res['pred_logits'][0].shape, 'frame_res[pred_logits][0]:', frame_res['pred_logits'][0].shape, 'frame_res[hs][0]:', frame_res['hs'][0].shape)   
-        # print('track_instances.scores:', track_instances.scores.shape, 'track_scores:', track_scores.shape)
+        print('track_instances.scores:', track_instances.scores.shape, 'track_scores:', track_scores.shape)
         track_instances.scores = track_scores
         track_instances.pred_logits = frame_res['pred_logits'][0]
         track_instances.pred_boxes = frame_res['pred_boxes'][0]
