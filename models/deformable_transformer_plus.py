@@ -31,6 +31,9 @@ from models.deformable_detr import MLP
 from util.sineembed_position import gen_sineembed_for_position, _get_clones_dec
 from util.axial_attention import AxialAttention, AxialBlock
 
+
+
+
 class DeformableTransformer(nn.Module):
     def __init__(self, d_model=256, nhead=8,
                  num_encoder_layers=6, num_decoder_layers=6, dim_feedforward=1024, dropout=0.1,
@@ -108,8 +111,16 @@ class DeformableTransformer(nn.Module):
         self.label_enc=nn.Embedding(num_classes,d_model)
         # Mask prediction
         self.mask_embed = MLP(d_model, d_model, d_model, 3)
-        self.AxialBlock = AxialBlock(d_model,d_model // 2) # Initialized
+        # self.AxialBlock = AxialBlock(d_model,d_model // 2) # Initialized
         self.level_embed = nn.Parameter(torch.Tensor(num_feature_levels, d_model))
+        
+        # Ref point embedding for QIM
+        self.reference_point_transform = MLP(input_dim=4, hidden_dim=128, output_dim=256, num_layers=3)
+        self.reverse_transform = MLP(input_dim=256, hidden_dim=128, output_dim=4, num_layers=3)
+        
+        # Adding track queries
+        self.init_det = nn.Embedding(two_stage_num_proposals, d_model*2).weight
+        
         
         #
         if two_stage:
@@ -464,9 +475,12 @@ class DeformableTransformer(nn.Module):
             assert not torch.isnan(reference_points).any(), "NaN values detected in inter_ref 415."
             tgt_undetach = torch.gather(output_memory, 1,
                                   topk_proposals.unsqueeze(-1).repeat(1, 1, self.d_model))  # unsigmoid # Content query initialization from the top k predictions
-
+            
             outputs_class, outputs_mask = self.forward_prediction_heads(tgt_undetach.transpose(0, 1), srcs[0])
-            tgt = tgt_undetach.detach() # preventing gradient flow from decoder to encoder
+            tgt = tgt_undetach.detach() # preventing gradient flow from decoder to encoder --> lets put this as the track_instances.query_pos
+            
+            # self.init_det = nn.Parameter(tgt.detach().squeeze(0))
+            
             if self.learn_tgt:
                 tgt = self.query_feat.weight[None].repeat(bs, 1, 1)
             interm_outputs=dict()
@@ -493,12 +507,35 @@ class DeformableTransformer(nn.Module):
                 reference_points = box_xyxy_to_cxcywh(reference_points.sigmoid()) / torch.as_tensor([w, h, w, h],dtype=torch.float).to(src_flatten.device)                                                                        
                 reference_points = reference_points.reshape(outputs_mask.shape[0], outputs_mask.shape[1], 4)
                 reference_points = inverse_sigmoid(reference_points) # Serves as the positional query
-                # init_reference_out = reference_points
+                
+                #####################################################################################################
+                # Concatenating embedded ref points as pos_query and tgt as content query to pass them to QIM
+                batch_size, num_queries, _ = reference_points.shape
+                reference_points_flat = reference_points.view(batch_size * num_queries, 4)
+                positional_query = self.reference_point_transform(reference_points_flat)
+                
+                cat_queries = torch.cat([tgt.squeeze(0), positional_query], dim=-1)
+                
+                self.init_det = nn.Parameter(cat_queries)
+                #####################################################################################################
+                
         else:
             tgt = self.query_feat.weight[None].repeat(bs, 1, 1)
             reference_points = self.query_embed.weight[None].repeat(bs, 1, 1) # refpoint_embed in maskDINO
             assert not torch.isnan(reference_points).any(), "NaN values detected in inter_ref 451."
             # init_reference_out = reference_points
+            
+        self._value = tgt.shape[1]
+        
+        #####################################################################################################
+        # Extracting content and positional queries from query_embed after QIM
+        tgt = query_embed[:, :self.d_model]
+        tgt = tgt.unsqueeze(0)
+        positional_query = query_embed[:, self.d_model:]
+        reference_points_4d = self.reverse_transform(positional_query)
+        reference_points = reference_points_4d.view(1, positional_query.shape[0], 4)
+        reference_points = reference_points.sigmoid()
+        #####################################################################################################
         
         
         # Adding DN training
@@ -511,6 +548,8 @@ class DeformableTransformer(nn.Module):
             assert not torch.isnan(input_query_bbox).any(), "NaN values detected in input_query_bbox."
             if mask_dict is not None:
                 tgt=torch.cat([input_query_label, tgt],dim=1)
+                pad_noise_size = input_query_label.shape[1]
+                # tgt=torch.cat([input_query_label, query_embed.unsqueeze(0)],dim=1)
         
         # direct prediction from the matching and denoising part in the begining
         predictions_class = []
@@ -529,17 +568,22 @@ class DeformableTransformer(nn.Module):
         assert not torch.isnan(memory).any(), "NaN values detected in memory general."
         assert not torch.isnan(mask_flatten).any(), "NaN values detected in memory_key_padding_mask general."
         assert not torch.isnan(tgt_mask).any(), "NaN values detected in tgt_mask general."
-       
+        
+        
+        
+        
         hs, inter_references = self.decoder(
             tgt=tgt.transpose(0, 1), 
             memory=memory.transpose(0, 1),
+            pad_noise_size = pad_noise_size,
             memory_key_padding_mask=mask_flatten,
             pos=None,
             refpoints_unsigmoid=reference_points.transpose(0, 1),
             level_start_index=level_start_index,
             spatial_shapes=spatial_shapes,
             valid_ratios=valid_ratios,
-            tgt_mask=tgt_mask
+            tgt_mask=tgt_mask,
+    
         )
         
             
@@ -992,7 +1036,7 @@ class TransformerDecoder(nn.Module):
             if isinstance(m, MSDeformAttn):
                 m._reset_parameters()
 
-    def forward(self, tgt, memory,
+    def forward(self, tgt, memory, pad_noise_size,
                 tgt_mask: Optional[Tensor] = None,
                 memory_mask: Optional[Tensor] = None,
                 tgt_key_padding_mask: Optional[Tensor] = None,
@@ -1023,6 +1067,7 @@ class TransformerDecoder(nn.Module):
 
         intermediate = []
         reference_points = refpoints_unsigmoid.sigmoid().to(device)
+        print('tgt:', tgt.shape, 'reference_points:', reference_points.shape)
         # print("reference_points stats - Min:", reference_points.min(), "Max:", reference_points.max())
         assert not torch.isnan(reference_points).any(), "NAN found in reference_points in decoder after sigmoid"
         ref_points = [reference_points]
@@ -1039,9 +1084,12 @@ class TransformerDecoder(nn.Module):
             raw_query_pos = self.ref_point_head(query_sine_embed)  # nq, bs, 256
             pos_scale = self.query_scale(output) if self.query_scale is not None else 1
             query_pos = pos_scale * raw_query_pos
-
+            
             output = layer(
                 tgt=output,
+                
+                pad_noise_size = pad_noise_size,
+                
                 tgt_query_pos=query_pos,
                 tgt_query_sine_embed=query_sine_embed,
                 tgt_key_padding_mask=tgt_key_padding_mask,
@@ -1054,7 +1102,8 @@ class TransformerDecoder(nn.Module):
                 memory_pos=pos,
 
                 self_attn_mask=tgt_mask,
-                cross_attn_mask=memory_mask
+                cross_attn_mask=memory_mask,
+                
             )
 
             # iter update
@@ -1141,9 +1190,9 @@ class DeformableTransformerDecoderLayer(nn.Module):
         tgt = self.norm3(tgt)
         return tgt
 
-    def _forward_self_attn(self, tgt, query_pos, attn_mask=None):
+    def _forward_self_attn(self, tgt, query_pos, pad_noise_size, attn_mask=None):
         if self.extra_track_attn:
-            tgt = self._forward_track_attn(tgt, query_pos)
+            tgt = self._forward_track_attn(tgt, query_pos, pad_noise_size)
 
         q = k = self.with_pos_embed(tgt, query_pos)
         if attn_mask is not None:
@@ -1154,17 +1203,19 @@ class DeformableTransformerDecoderLayer(nn.Module):
         tgt = tgt + self.dropout2(tgt2)
         return self.norm2(tgt)
 
-    def _forward_track_attn(self, tgt, query_pos):
+    def _forward_track_attn(self, tgt, query_pos, pad_noise_size):
+        print('query_pos:', query_pos.shape, 'tgt:', tgt.shape)
         q = k = self.with_pos_embed(tgt, query_pos)
-        if q.shape[1] > 300:
-            tgt2 = self.update_attn(q[:, 300:].transpose(0, 1),
-                                    k[:, 300:].transpose(0, 1),
-                                    tgt[:, 300:].transpose(0, 1))[0].transpose(0, 1)
-            tgt = torch.cat([tgt[:, :300],self.norm4(tgt[:, 300:]+self.dropout5(tgt2))], dim=1)
+        total_queries = 300 + pad_noise_size
+        if q.shape[1] > total_queries:
+            tgt2 = self.update_attn(q[:, total_queries:].transpose(0, 1),
+                                    k[:, total_queries:].transpose(0, 1),
+                                    tgt[:, total_queries:].transpose(0, 1))[0].transpose(0, 1)
+            tgt = torch.cat([tgt[:, :total_queries], self.norm4(tgt[:, total_queries:] + self.dropout5(tgt2))], dim=1)
         return tgt
 
     def _forward_self_cross(self, tgt, query_pos, reference_points, src, src_spatial_shapes, level_start_index,
-                            src_padding_mask=None, attn_mask=None):
+                            pad_noise_size, src_padding_mask=None, attn_mask=None):
         
         if self.key_aware_type is not None:
             if self.key_aware_type == 'mean':
@@ -1175,7 +1226,7 @@ class DeformableTransformerDecoderLayer(nn.Module):
                 raise NotImplementedError("Unknown key_aware_type: {}".format(self.key_aware_type))
             
         # self attention
-        tgt = self._forward_self_attn(tgt, query_pos, attn_mask)
+        tgt = self._forward_self_attn(tgt, query_pos, pad_noise_size, attn_mask)
         # cross attention
         tgt2 = self.cross_attn(self.with_pos_embed(tgt, query_pos).transpose(0, 1),
                                reference_points.transpose(0, 1).contiguous(),
@@ -1188,7 +1239,7 @@ class DeformableTransformerDecoderLayer(nn.Module):
 
         return tgt
 
-    def _forward_cross_self(self, tgt, query_pos, reference_points, src, src_spatial_shapes, level_start_index,
+    def _forward_cross_self(self, tgt, query_pos, reference_points, src, src_spatial_shapes, level_start_index, pad_noise_size,
                             src_padding_mask=None, attn_mask=None):
         # cross attention
         tgt2 = self.cross_attn(self.with_pos_embed(tgt, query_pos),
@@ -1197,7 +1248,7 @@ class DeformableTransformerDecoderLayer(nn.Module):
         tgt = tgt + self.dropout1(tgt2)
         tgt = self.norm1(tgt)
         # self attention
-        tgt = self._forward_self_attn(tgt, query_pos, attn_mask)
+        tgt = self._forward_self_attn(tgt, query_pos, pad_noise_size, attn_mask)
         # ffn
         tgt = self.forward_ffn(tgt)
 
@@ -1207,6 +1258,7 @@ class DeformableTransformerDecoderLayer(nn.Module):
     def forward(self,
                 # for tgt
                 tgt: Optional[Tensor],  # nq, bs, d_model
+                pad_noise_size: Optional[int],
                 tgt_query_pos: Optional[Tensor] = None,  # pos for query. MLP(Sine(pos))
                 tgt_query_sine_embed: Optional[Tensor] = None,  # pos for query. Sine(pos)
                 tgt_key_padding_mask: Optional[Tensor] = None,
@@ -1228,12 +1280,13 @@ class DeformableTransformerDecoderLayer(nn.Module):
             - tgt/tgt_query_pos: nq, bs, d_model
             -
         """
+        
         attn_mask = None
         if self.self_cross:
             return self._forward_self_cross(tgt, tgt_query_pos, tgt_reference_points, memory, memory_spatial_shapes,
-                                            memory_level_start_index, memory_key_padding_mask, attn_mask)
+                                            memory_level_start_index, pad_noise_size, memory_key_padding_mask, attn_mask)
         return self._forward_cross_self(tgt, tgt_query_pos, tgt_reference_points, memory, memory_spatial_shapes,
-                                            memory_level_start_index, memory_key_padding_mask, attn_mask)
+                                            memory_level_start_index, pad_noise_size, memory_key_padding_mask, attn_mask)
 
 
 
@@ -1280,7 +1333,6 @@ def build_deforamble_transformer(args):
         query_dim = 4,
         dec_layer_share = False,
     )
-
 
 
 
