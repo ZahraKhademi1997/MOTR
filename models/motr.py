@@ -30,6 +30,8 @@ from .qim import build as build_query_interaction_layer
 from .memory_bank import build_memory_bank
 from .deformable_detr import SetCriterion, MLP
 from .segmentation import sigmoid_focal_loss
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib import patches
 import code
@@ -520,7 +522,7 @@ class ClipMatcher(SetCriterion):
         
        
         def plot_and_save_masks(active_idxes, predicted_masks, ground_truth_masks, active_gt_boxes, active_predicted_boxes, output_dir):
-            active_predictions = predicted_masks[active_idxes]
+            active_predictions = predicted_masks[active_idxes].detach().sigmoid()
             num_active = active_predictions.shape[0]
             num_gt = ground_truth_masks.shape[0]
             num_plots = max(num_active, num_gt)
@@ -939,7 +941,7 @@ class MOTR(nn.Module):
             outputs_coord_list = []
         else:
             outputs_coord_list = [ref0.to(device)]
-        for dec_lid, (layer_ref_sig, layer_bbox_embed, layer_hs) in enumerate(zip(reference[:-1], self.bbox_embed, hs)):
+        for dec_lid, (layer_ref_sig, layer_bbox_embed, layer_hs) in enumerate(zip(reference[:-1], self.transformer.bbox_embed, hs)):
             assert not torch.isnan(layer_ref_sig).any(), "NaN values detected in layer_ref_sig in pred_box."
             assert not torch.isnan(layer_hs).any(), "NaN values detected in layer_hs in pred_box."
 
@@ -1208,7 +1210,7 @@ class MOTR(nn.Module):
         # max_h, max_w = frame_shape[0], frame_shape[1]
         # pred_masks_interpolated = torch.nn.functional.interpolate(pred_masks.unsqueeze(0), size=(max_h, max_w), mode='nearest').squeeze(0)
         # print('track_score:', track_scores.shape, 'frame_res[pred_logits][0]:', frame_res['pred_logits'][0].shape, 'frame_res[pred_logits][0]:', frame_res['pred_logits'][0].shape, 'frame_res[hs][0]:', frame_res['hs'][0].shape)   
-        print('track_instances.scores:', track_instances.scores.shape, 'track_scores:', track_scores.shape)
+        # print('track_instances.scores:', track_instances.scores.shape, 'track_scores:', track_scores.shape)
         track_instances.scores = track_scores
         track_instances.pred_logits = frame_res['pred_logits'][0]
         track_instances.pred_boxes = frame_res['pred_boxes'][0]
