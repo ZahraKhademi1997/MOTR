@@ -694,6 +694,11 @@ def train_one_epoch_mot(model: torch.nn.Module, criterion: torch.nn.Module,
             'decoder': model.transformer.decoder,
             'input_proj': model.input_proj,
             'PerPixelEmbedding' : model.PerPixelEmbedding,
+            'track_embed' : model.track_embed,
+            'box_embed' : model.transformer.bbox_embed,
+            'class_embed' : model.transformer.class_embed,
+            'mask_embed' : model.transformer.mask_embed,
+            'label_enc' : model.transformer.label_enc,
             'post_process': model.post_process,
             
         }
