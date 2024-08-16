@@ -40,7 +40,7 @@ class DeformableTransformer(nn.Module):
                  activation="relu", return_intermediate_dec=False,
                  num_feature_levels=4, dec_n_points=4,  enc_n_points=4,
                  two_stage=True, two_stage_num_proposals=300, decoder_self_cross=True, sigmoid_attn=False,
-                 extra_track_attn=False, dn = True, dn_num=300, noise_scale=0.4, num_classes = 1, initial_pred=True, learn_tgt = False, initialize_box_type = False, query_dim = 4, dec_layer_share = False):
+                 extra_track_attn=False, dn = True, dn_num=300, noise_scale=0.4, num_classes = 1, initial_pred=True, learn_tgt = False, initialize_box_type = 'bitmask', query_dim = 4, dec_layer_share = False):
         super().__init__()
 
         self.new_frame_adaptor = None
@@ -494,7 +494,7 @@ class DeformableTransformer(nn.Module):
             if self.initialize_box_type != 'no':
                 # convert masks into boxes to better initialize box in the decoder
                 assert self.initial_pred
-                flaten_mask = outputs_mask.detach().flatten(0, 1)
+                flaten_mask = outputs_mask.detach().sigmoid().flatten(0, 1)
                 h, w = outputs_mask.shape[-2:]
                 if self.initialize_box_type == 'bitmask':  # slower, but more accurate
                     reference_points = BitMasks(flaten_mask > 0).get_bounding_boxes().tensor.to(src_flatten.device)
@@ -1062,7 +1062,6 @@ class TransformerDecoder(nn.Module):
 
         intermediate = []
         reference_points = refpoints_unsigmoid.sigmoid().to(device)
-        print('tgt:', tgt.shape, 'reference_points:', reference_points.shape)
         # print("reference_points stats - Min:", reference_points.min(), "Max:", reference_points.max())
         assert not torch.isnan(reference_points).any(), "NAN found in reference_points in decoder after sigmoid"
         ref_points = [reference_points]
@@ -1329,7 +1328,7 @@ def build_deforamble_transformer(args):
         num_classes = 1,
         initial_pred=True,
         learn_tgt = False,
-        initialize_box_type = False,
+        initialize_box_type = 'bitmask',
         query_dim = 4,
         dec_layer_share = False,
     )
