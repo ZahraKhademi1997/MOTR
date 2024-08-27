@@ -143,14 +143,14 @@ class ClipMatcher(SetCriterion):
         # We ignore the regression loss of the track-disappear slots.
         #TODO: Make this filter process more elegant.
         
-        assert all(len(gt) > 0 for gt in gt_instances), "Empty ground truth instances."
-        assert all(isinstance(ind, tuple) and len(ind) == 2 for ind in indices), "Indices format is incorrect."
+        # assert all(len(gt) > 0 for gt in gt_instances), "Empty ground truth instances."
+        # assert all(isinstance(ind, tuple) and len(ind) == 2 for ind in indices), "Indices format is incorrect."
         
-        for i, (src_per_img, tgt_per_img) in enumerate(indices):
-            # print(f"Max src index: {src_per_img.max()}, Outputs size: {outputs['pred_logits'][i].shape[0]}")
-            # print(f"Max tgt index: {tgt_per_img.max()}, GT instances size: {len(gt_instances[i])}")
-            assert src_per_img.max() < outputs['pred_logits'][i].shape[0], "Source index out of bounds."
-            assert tgt_per_img.max() < len(gt_instances[i]), "Target index out of bounds."
+        # for i, (src_per_img, tgt_per_img) in enumerate(indices):
+        #     # print(f"Max src index: {src_per_img.max()}, Outputs size: {outputs['pred_logits'][i].shape[0]}")
+        #     # print(f"Max tgt index: {tgt_per_img.max()}, GT instances size: {len(gt_instances[i])}")
+        #     assert src_per_img.max() < outputs['pred_logits'][i].shape[0], "Source index out of bounds."
+        #     assert tgt_per_img.max() < len(gt_instances[i]), "Target index out of bounds."
         
     
         filtered_idx = []
@@ -202,8 +202,8 @@ class ClipMatcher(SetCriterion):
             gt_labels_target = gt_labels_target.to(src_logits)
             loss_ce = sigmoid_focal_loss(src_logits.flatten(1),
                                              gt_labels_target.flatten(1),
-                                             alpha=0.25,
-                                             gamma=2,
+                                             alpha=-1,
+                                             gamma=0,
                                              num_boxes=num_boxes, mean_in_dim1=False)
             loss_ce = loss_ce.sum()
         else:
@@ -522,7 +522,8 @@ class ClipMatcher(SetCriterion):
         
        
         def plot_and_save_masks(active_idxes, predicted_masks, ground_truth_masks, active_gt_boxes, active_predicted_boxes, output_dir):
-            active_predictions = predicted_masks[active_idxes].detach().sigmoid()
+            # active_predictions = predicted_masks[active_idxes].detach().sigmoid()
+            active_predictions = predicted_masks[active_idxes]
             num_active = active_predictions.shape[0]
             num_gt = ground_truth_masks.shape[0]
             num_plots = max(num_active, num_gt)
@@ -539,7 +540,7 @@ class ClipMatcher(SetCriterion):
                         # print('active_predicted_boxes[i]:', active_predicted_boxes[i])
                         x1_p, y1_p, x2_p, y2_p = active_predicted_boxes[i]
                         mask_height_p, mask_width_p = active_predictions[i].shape[0] , active_predictions[i].shape[1]
-                        # print('x1_p:', x1_p, 'y1_p:', y1_p, 'x2_p:', x2_p, 'y2_p:', y2_p) # x1_p: tensor(0.7680) y1_p: tensor(0.0493) x2_p: tensor(0.7896) y2_p: tensor(0.0750)
+                        # print('x1_p:', x1_p, 'y1_p:', y1_p, 'x2_p:', x2_p, '2_p:', y2_p) # x1_p: tensor(0.7680) y1_p: tensor(0.0493) x2_p: tensor(0.7896) y2_p: tensor(0.0750)
                         axes[0].imshow(active_predictions[i].detach().cpu().numpy(), cmap='gray', interpolation='nearest')
                         rect_pred = patches.Rectangle((x1_p*mask_width_p, y1_p * mask_height_p),
                                                     x2_p * mask_width_p- x1_p * mask_width_p,
@@ -572,7 +573,10 @@ class ClipMatcher(SetCriterion):
         active_track_masks_primarly = track_instances.pred_masks[active_idxes]
         if len(active_track_masks_primarly) > 0: 
             gt_masks = gt_instances_i.masks[track_instances.matched_gt_idxes[active_idxes]].float()
-            plot_and_save_masks(active_idxes, track_instances.pred_masks, gt_masks, gt_boxes, active_track_boxes, '/home/zahra/Documents/Projects/prototype/MOTR-codes/DN-DBA-MOTR-Mask/output/criterion')
+            # save_dir = os.path.join(args.save_path, 'criterion')
+            # if not os.path.exists(save_dir):
+            #     os.mkdir(save_dir)
+            plot_and_save_masks(active_idxes, track_instances.pred_masks, gt_masks, gt_boxes, active_track_boxes, '/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR-mask-DN-DAB-Track-MOTS/output/criterion')
 
         # active_track_masks = active_track_masks.sigmoid()
         # step7. merge the unmatched pairs and the matched pairs.
@@ -886,7 +890,7 @@ class MOTR(nn.Module):
         #     hidden_dim,
         #     norm = None) # Initialized
         
-        # self.AxialBlock = AxialBlock(hidden_dim,hidden_dim // 2) # Initialized
+        self.AxialBlock = AxialBlock(hidden_dim,hidden_dim // 2) # Initialized
         self.initial_pred = initial_pred
         
         
@@ -1099,9 +1103,7 @@ class MOTR(nn.Module):
         src, mask = features[-1].decompose()
         # Per-Pixel Decoding
         embeddings, multi_scale_features = self.PerPixelEmbedding(features, (samples.tensors.shape[2], samples.tensors.shape[3]))
-        # print('embeddings in MOTR:', embeddings.shape)
-        # embeddings_plot = embeddings
-        # embed_size = (embeddings.shape[2], embeddings.shape[3])
+        attention_embedding, similarity_h, similarity_w = self.AxialBlock(embeddings)
         
         
         bs = features[-1].tensors.shape[0]
@@ -1134,10 +1136,10 @@ class MOTR(nn.Module):
         # hs, init_reference, inter_references, enc_outputs_class, enc_outputs_coord_unact, memory, multi_level_memory, out_interm, mask_dict = self.transformer(srcs, masks, pos,  targets, ref_pts=None)
         # hs, init_reference, inter_references, out, mask_dict = self.transformer(srcs, masks, pos, embeddings,  targets, ref_pts=None)
 
-        hs, init_reference, inter_references, mask_dict, predictions_class, predictions_mask, interm_outputs = self.transformer(srcs, masks, pos, embeddings,  targets, track_instances.query_pos, ref_pts=None)
+        hs, init_reference, inter_references, mask_dict, predictions_class, predictions_mask, interm_outputs = self.transformer(srcs, masks, pos, embeddings, attention_embedding,  targets, track_instances.query_pos, ref_pts=None)
         
         for i, output in enumerate(hs):
-            outputs_class, outputs_mask = self.forward_prediction_heads(output.transpose(0, 1), embeddings, self.training or (i == len(hs)-1))
+            outputs_class, outputs_mask = self.forward_prediction_heads(output.transpose(0, 1), attention_embedding, embeddings, self.training or (i == len(hs)-1))
             predictions_class.append(outputs_class)
             predictions_mask.append(outputs_mask)
 
@@ -1184,10 +1186,11 @@ class MOTR(nn.Module):
         
         out = {
             'pred_logits': predictions_class[-1],
-            'pred_masks': predictions_mask[-1],
+            'pred_masks': predictions_mask[-1].sigmoid(),
+            # 'pred_masks': predictions_mask[-1],
             'pred_boxes':out_boxes[-1],
             'aux_outputs': self._set_aux_loss(
-                predictions_class , predictions_mask, out_boxes
+                predictions_class , predictions_mask, out_boxes # Applying sigmoid to the masks
             )
         }
         out['ref_pts'] =  ref_pts_all[5]
@@ -1209,8 +1212,9 @@ class MOTR(nn.Module):
         
         # max_h, max_w = frame_shape[0], frame_shape[1]
         # pred_masks_interpolated = torch.nn.functional.interpolate(pred_masks.unsqueeze(0), size=(max_h, max_w), mode='nearest').squeeze(0)
-        # print('track_score:', track_scores.shape, 'frame_res[pred_logits][0]:', frame_res['pred_logits'][0].shape, 'frame_res[pred_logits][0]:', frame_res['pred_logits'][0].shape, 'frame_res[hs][0]:', frame_res['hs'][0].shape)   
-        # print('track_instances.scores:', track_instances.scores.shape, 'track_scores:', track_scores.shape)
+        # Filter scores greater than 0.6
+        high_scores = track_scores[track_scores > 0.5]
+        print("Track scores:", high_scores)
         track_instances.scores = track_scores
         track_instances.pred_logits = frame_res['pred_logits'][0]
         track_instances.pred_boxes = frame_res['pred_boxes'][0]
@@ -1493,7 +1497,7 @@ def build(args):
     # losses = ['labels', 'boxes']
     losses = ['labels', 'boxes', 'masks']
     importance_sample_ratio = 0.75
-    oversample_ratio = 3.0
+    oversample_ratio = 3.5
     num_points = 12544
     
     dn_losses = []

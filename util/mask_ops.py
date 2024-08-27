@@ -121,6 +121,8 @@ def batch_dice_loss(inputs: torch.Tensor, targets: torch.Tensor):
                  classification label for each element in inputs
                 (0 for the negative class and 1 for the positive class).
     """
+    if inputs.min() < 0 or inputs.max() > 1: # To avoid applying sigmoid to the already sigmoid inputs but apply it to interm outputs
+        inputs = inputs.sigmoid()
     inputs = inputs.sigmoid()
     inputs = inputs.flatten(1)
     numerator = 2 * torch.einsum("nc,mc->nm", inputs, targets)

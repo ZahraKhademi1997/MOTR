@@ -17,7 +17,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn, Tensor
 from torch.nn.init import xavier_uniform_, constant_, uniform_, normal_
-
+from util.cross_attention import CrossAttentionLayer
 from models.structures import Boxes, matched_boxlist_iou, pairwise_iou
 
 from util.misc import inverse_sigmoid
@@ -133,6 +133,11 @@ class DeformableTransformer(nn.Module):
             
         self.num_decoder_layers = num_decoder_layers
         
+        self.pos_cross_attention = CrossAttentionLayer(
+            d_model=d_model, nhead=8, dropout=0, activation="relu",
+            normalize_before=False
+        )
+
         self._reset_parameters()
 
     
@@ -430,7 +435,7 @@ class DeformableTransformer(nn.Module):
         return valid_ratio
     
     
-    def forward(self, srcs, masks, pos_embeds, embeddings, targets = None, query_embed=None, ref_pts=None):
+    def forward(self, srcs, masks, pos_embeds, embeddings, attention_embedding, targets = None, query_embed=None, ref_pts=None):
         assert self.two_stage or query_embed is not None
 
         # prepare input for encoder
@@ -553,7 +558,7 @@ class DeformableTransformer(nn.Module):
         predictions_class = []
         predictions_mask = []
         if self.initial_pred:
-            outputs_class, outputs_mask = self.forward_prediction_heads(tgt.transpose(0, 1), embeddings, self.training)
+            outputs_class, outputs_mask = self.forward_prediction_heads(tgt.transpose(0, 1), attention_embedding, embeddings, self.training)
             predictions_class.append(outputs_class)
             predictions_mask.append(outputs_mask)
         if self.dn != "no" and self.training and mask_dict is not None:
@@ -672,16 +677,26 @@ class DeformableTransformer(nn.Module):
     #     return outputs_coord_list
     
     
-    def forward_prediction_heads(self, output, mask_features, pred_mask=True): # Mask and class prediction head
+    def forward_prediction_heads(self, output, mask_features, embeddings=None, pred_mask=True): # Mask and class prediction head
         decoder_output = self.decoder_norm(output)
         decoder_output = decoder_output.transpose(0, 1) # queries
         outputs_class = self.class_embed(decoder_output)
         outputs_mask = None
         if pred_mask:
             mask_embed = self.mask_embed(decoder_output)
-            # attention_embedding, similarity_h, similarity_w = self.AxialBlock(mask_features)
-            # outputs_mask = torch.einsum("bqc,bchw->bqhw", mask_embed, attention_embedding)
-            outputs_mask = torch.einsum("bqc,bchw->bqhw", mask_embed, mask_features)
+            if embeddings is not None:
+                embeddings = embeddings.flatten(2).transpose(
+                        1, 2)
+                embeddings = embeddings.view(embeddings.shape[1], embeddings.shape[2])
+                # print('mask_embed:', mask_embed.shape, 'embeddings:', embeddings.shape)
+                cross_attended_output = self.pos_cross_attention(
+                            tgt=mask_embed.squeeze(0),
+                            memory=embeddings,
+                        ).unsqueeze(0)
+                # print('cross_attended_output:', cross_attended_output.shape, 'mask_features:', mask_features.shape)
+                outputs_mask = torch.einsum("bqc,bchw->bqhw", cross_attended_output, mask_features)
+            else:
+                outputs_mask = torch.einsum("bqc,bchw->bqhw", mask_embed, mask_features)
         return outputs_class, outputs_mask
     
     

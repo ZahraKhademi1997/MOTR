@@ -29,7 +29,11 @@ import datasets.samplers as samplers
 from datasets import build_dataset, get_coco_api_from_dataset
 from engine import evaluate, train_one_epoch, train_one_epoch_mot
 from models import build_model
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 from torch.utils.tensorboard import SummaryWriter
+
 
 
 def get_args_parser():
@@ -218,10 +222,10 @@ def get_args_parser():
     ###########################################################################
     # () Adding masks loss coef
     parser.add_argument('--mask_loss_coef', default=2, type=float)
-    parser.add_argument('--dice_loss_coef', default=2, type=float)
+    parser.add_argument('--dice_loss_coef', default=3, type=float)
     parser.add_argument('--cost_giou_mask_to_box_coef', default=2, type=float)
     ###########################################################################
-    parser.add_argument('--cls_loss_coef', default=2, type=float)
+    parser.add_argument('--cls_loss_coef', default=5, type=float)
     parser.add_argument('--bbox_loss_coef', default=5, type=float)
     parser.add_argument('--giou_loss_coef', default=2, type=float)
     # parser.add_argument('--focal_alpha', default=0.25, type=float)
@@ -251,6 +255,8 @@ def get_args_parser():
 
     # end-to-end mot settings.
     parser.add_argument('--mot_path', default='/data/Dataset/mot', type=str)
+    parser.add_argument('--save_path', default='/output', type=str)
+    parser.add_argument('--log_path', default='/outputs', type=str)
     parser.add_argument('--input_video', default='figs/demo.mp4', type=str)
     # parser.add_argument('--data_txt_path_train',
     #                     default='./datasets/data_path/detmot17.train', type=str,
@@ -314,7 +320,10 @@ def get_args_parser():
 def main(args):
     ############################################################################
     # () Logging
-    writer = SummaryWriter(log_dir='/home/zahra/Documents/Projects/prototype/MOTR-codes/DN-DBA-MOTR-Mask/outputs/logs/logs_loss')
+    log_dir = os.path.join(args.log_path, 'logs/logs_loss')
+    # if not os.path.exists(log_dir):
+    #     os.mkdir(log_dir)
+    writer = SummaryWriter(log_dir=log_dir)
     ############################################################################
     
     utils.init_distributed_mode(args)
@@ -334,30 +343,30 @@ def main(args):
 
     model, criterion, postprocessors = build_model(args)
     model.to(device)
-    output_dir = "/home/zahra/Documents/Projects/prototype/MOTR-codes/DN-DBA-MOTR-Mask/outputs/model_two_stages.txt"
+    output_dir = "/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR-mask-DN-DAB-Track-MOTS/outputs/model_two_stages.txt"
     with open (output_dir, 'w') as f:
         f.write (str(model))
 
     model_without_ddp = model
+    
     # Freeze all parameters
-    # for param in model_without_ddp.parameters():
-    #     param.requires_grad = False
+    for param in model_without_ddp.parameters():
+        param.requires_grad = True
 
     # # Unfreeze segmentation head parameters
-    # for param in model_without_ddp.PerPixelEmbedding.parameters():
-    #     param.requires_grad = True
+    for param in model_without_ddp.PerPixelEmbedding.parameters():
+        param.requires_grad = False
         
-    # for param in model_without_ddp.FPNEncoder.parameters():
-    #     param.requires_grad = True
+    for param in model_without_ddp.AxialBlock.parameters():
+        param.requires_grad = False
+    
+    for param in model_without_ddp.transformer.pos_cross_attention.parameters():
+        param.requires_grad = False
         
-    # for param in model_without_ddp.seg_branches.parameters():
-    #     param.requires_grad = True
-    
-    # for param in model_without_ddp.AxialBlock.parameters():
-    #     param.requires_grad = True
-    
-    # for param in model_without_ddp.pos_cross_attention.parameters():
-    #     param.requires_grad = True
+    for param in model_without_ddp.transformer.mask_embed.parameters():
+        param.requires_grad = False
+        
+        
     
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print('number of params:', n_parameters)
@@ -409,7 +418,7 @@ def main(args):
                  # () Adding different learning rate for the segmentation head
                  and not match_name_keywords(n, args.lr_PerPixelEmbedding_names)
                 #  and not match_name_keywords(n, args.lr_seg_branches_names)
-                #  and not match_name_keywords(n, args.lr_AxialBlock_names)
+                 and not match_name_keywords(n, args.lr_AxialBlock_names)
                 #  and not match_name_keywords(n, args.lr_pos_cross_attention_names)
                 #  and not match_name_keywords(n, args.lr_FPNEncoder_names)
                  #############################################################
@@ -450,14 +459,14 @@ def main(args):
         #     # "weight_decay": args.mask_head_weight_decay, 
         # },
 
-        # {
-        #     "params": [
-        #         p for n, p in model_without_ddp.named_parameters()
-        #         if match_name_keywords(n, args.lr_AxialBlock_names) and p.requires_grad
-        #     ],
-        #     "lr": args.lr_AxialBlock,
-        #     # "weight_decay": args.mask_head_weight_decay, 
-        # },
+        {
+            "params": [
+                p for n, p in model_without_ddp.named_parameters()
+                if match_name_keywords(n, args.lr_AxialBlock_names) and p.requires_grad
+            ],
+            "lr": args.lr_AxialBlock,
+            # "weight_decay": args.mask_head_weight_decay, 
+        },
         
         
         # {

@@ -682,7 +682,10 @@ def train_one_epoch_mot(model: torch.nn.Module, criterion: torch.nn.Module,
     
     #####################################################################
     # () Defining function to log gradient of different part of the model 
-    writer_grad = SummaryWriter('/home/zahra/Documents/Projects/prototype/MOTR-codes/DN-DBA-MOTR-Mask/outputs/logs/logs_grad') 
+    # log_dir = os.path.join(self.args.log_path, 'logs/logs_grad')
+    # if not os.path.exists(log_dir):
+    #     os.mkdir(log_dir)
+    writer_grad = SummaryWriter('/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR-mask-DN-DAB-Track-MOTS/outputs/logs/logs_grad') 
     def log_gradients(model, writer_grad, epoch, iteration):
         # Check if the model is wrapped in DistributedDataParallel
         if isinstance(model, torch.nn.parallel.DistributedDataParallel):
@@ -695,15 +698,35 @@ def train_one_epoch_mot(model: torch.nn.Module, criterion: torch.nn.Module,
             'input_proj': model.input_proj,
             'PerPixelEmbedding' : model.PerPixelEmbedding,
             'track_embed' : model.track_embed,
-            'box_embed' : model.transformer.bbox_embed,
+            'transformer box_embed' : model.transformer.bbox_embed,
             'class_embed' : model.transformer.class_embed,
             'mask_embed' : model.transformer.mask_embed,
             'label_enc' : model.transformer.label_enc,
+            'box_embed' : model.bbox_embed,
+            'AxialBlock' : model.AxialBlock,
+            'pos_cross_attention' : model.transformer.pos_cross_attention,
             'post_process': model.post_process,
             
         }
 
+        # Freeze all parameters
+        for param in model.parameters():
+            param.requires_grad = True
+
+        # # Unfreeze segmentation head parameters
+        for param in model.PerPixelEmbedding.parameters():
+            param.requires_grad = False
             
+        for param in model.AxialBlock.parameters():
+            param.requires_grad = False
+        
+        for param in model.transformer.pos_cross_attention.parameters():
+            param.requires_grad = False
+            
+        for param in model.transformer.mask_embed.parameters():
+            param.requires_grad = False
+        
+           
 
         for name, module in modules.items():
             total_grad_norm = 0

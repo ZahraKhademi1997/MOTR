@@ -55,7 +55,8 @@ class CrossAttentionLayer(nn.Module):
         tgt = tgt + self.dropout(tgt2)
         tgt = self.norm(tgt)
         
-        return tgt, attn_weights
+        # return tgt, attn_weights
+        return tgt
 
     def forward_pre(self, tgt, memory,
                     memory_mask: Optional[Tensor] = None,
@@ -69,7 +70,9 @@ class CrossAttentionLayer(nn.Module):
                                    key_padding_mask=memory_key_padding_mask)
         tgt = tgt + self.dropout(tgt2)
 
-        return tgt, attn_map
+        # return tgt, attn_map
+        return tgt
+
 
     def forward(self, tgt, memory,
                 memory_mask: Optional[Tensor] = None,
