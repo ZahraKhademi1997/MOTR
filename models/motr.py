@@ -573,10 +573,7 @@ class ClipMatcher(SetCriterion):
         active_track_masks_primarly = track_instances.pred_masks[active_idxes]
         if len(active_track_masks_primarly) > 0: 
             gt_masks = gt_instances_i.masks[track_instances.matched_gt_idxes[active_idxes]].float()
-            # save_dir = os.path.join(args.save_path, 'criterion')
-            # if not os.path.exists(save_dir):
-            #     os.mkdir(save_dir)
-            plot_and_save_masks(active_idxes, track_instances.pred_masks, gt_masks, gt_boxes, active_track_boxes, '/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR-mask-DN-DAB-Track-MOTS/output/criterion')
+            plot_and_save_masks(active_idxes, track_instances.pred_masks, gt_masks, gt_boxes, active_track_boxes, '/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR_mask_DN_DAB/output/criterion')
 
         # active_track_masks = active_track_masks.sigmoid()
         # step7. merge the unmatched pairs and the matched pairs.
@@ -585,7 +582,8 @@ class ClipMatcher(SetCriterion):
         # step8. calculate losses.
         self.num_samples += len(gt_instances_i) + num_disappear_track
         self.sample_device = pred_logits_i.device
-        # print('outputs:', outputs)
+        
+                 # Loss calculation for Hungarian between matched indices
         for loss in self.losses:
             new_track_loss = self.get_loss(loss,
                                            outputs=outputs_i,
@@ -595,34 +593,35 @@ class ClipMatcher(SetCriterion):
             self.losses_dict.update(
                 {'frame_{}_{}'.format(self._current_frame_idx, key): value for key, value in new_track_loss.items()})
             
-        # Adding DN loss
+            
+       
+        # Hungarian between DN indices
         if self.dn != "no" and mask_dict is not None:
-            l_dict={}
-            for loss in self.dn_losses:
-                l_dict.update(self.get_loss(loss, 
-                                              output_known_lbs_bboxes,
-                                              gt_instances=[gt_instances_i],
-                                              indices=exc_idx,
-                                              num_boxes=1*scalar))
-            l_dict = {k + f'_dn': v for k, v in l_dict.items()}
-            self.losses_dict.update(
-                            {'frame_{}_aux{}_{}'.format(self._current_frame_idx, i, key): value for key, value in
-                            l_dict.items()})
-        elif self.dn != "no":
-            l_dict = dict()
-            l_dict['loss_bbox_dn'] = torch.as_tensor(0.).to(pred_logits_i.device)
-            l_dict['loss_giou_dn'] = torch.as_tensor(0.).to(pred_logits_i.device)
-            l_dict['loss_ce_dn'] = torch.as_tensor(0.).to(pred_logits_i.device)
-            if self.dn == "seg":
-                l_dict['loss_mask_dn'] = torch.as_tensor(0.).to(pred_logits_i.device)
-                l_dict['loss_dice_dn'] = torch.as_tensor(0.).to(pred_logits_i.device)
-            self.losses_dict.update(
-                {'frame_{}_aux{}_{}'.format(self._current_frame_idx, i, key): value for key, value in
-                l_dict.items()})
+            for loss in self.losses:
+                dn_loss = self.get_loss(loss, 
+                                        outputs=output_known_lbs_bboxes,
+                                        gt_instances=[gt_instances_i],
+                                        indices=exc_idx,
+                                        num_boxes=1*scalar)
+                self.losses_dict.update(
+                    {'frame_{}_{}_dn'.format(self._current_frame_idx, key): value for key, value in dn_loss.items()})
+            
+        # elif self.dn != "no":
+        #     l_dict = dict()
+        #     l_dict['loss_bbox_dn'] = torch.as_tensor(0.).to(pred_logits_i.device)
+        #     l_dict['loss_giou_dn'] = torch.as_tensor(0.).to(pred_logits_i.device)
+        #     l_dict['loss_ce_dn'] = torch.as_tensor(0.).to(pred_logits_i.device)
+        #     if self.dn == "seg":
+        #         l_dict['loss_mask_dn'] = torch.as_tensor(0.).to(pred_logits_i.device)
+        #         l_dict['loss_dice_dn'] = torch.as_tensor(0.).to(pred_logits_i.device)
+        #     self.losses_dict.update(
+        #         {'frame_{}_aux{}_{}'.format(self._current_frame_idx, i, key): value for key, value in
+        #         l_dict.items()})
 
-        # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
-        if "aux_outputs" in outputs:
-            for i, aux_outputs in enumerate(outputs["aux_outputs"]):
+
+        # Hungarian between Aux indices
+        if 'aux_outputs' in outputs:
+            for i, aux_outputs in enumerate(outputs['aux_outputs']):
                 unmatched_outputs_layer = {
                     'pred_logits': aux_outputs['pred_logits'][0, unmatched_track_idxes].unsqueeze(0),
                     'pred_boxes': aux_outputs['pred_boxes'][0, unmatched_track_idxes].unsqueeze(0),
@@ -631,47 +630,53 @@ class ClipMatcher(SetCriterion):
                 new_matched_indices_layer = match_for_single_decoder_layer(unmatched_outputs_layer, self.matcher)
                 matched_indices_layer = torch.cat([new_matched_indices_layer, prev_matched_indices], dim=0)
                 for loss in self.losses:
-                    l_dict = self.get_loss(loss, 
-                                             aux_outputs,
-                                             gt_instances=[gt_instances_i],
-                                             indices=[(matched_indices_layer[:, 0], matched_indices_layer[:, 1])],
-                                             num_boxes=1,)
-                    l_dict = {k + f"_{i}": v for k, v in l_dict.items()}
+                    # if loss == 'masks':
+                    #     # Intermediate masks losses are too costly to compute, we ignore them.
+                    #     continue
+                    l_dict = self.get_loss(loss,
+                                           aux_outputs,
+                                           gt_instances=[gt_instances_i],
+                                           indices=[(matched_indices_layer[:, 0], matched_indices_layer[:, 1])],
+                                           num_boxes=1, )
                     self.losses_dict.update(
-                            {'frame_{}_aux{}_{}'.format(self._current_frame_idx, i, key): value for key, value in
-                            l_dict.items()})
-                if 'interm_outputs' in outputs:
-                    start = 0
-                else:
-                    start = 1
-                if i>=start:
-                    if self.dn != "no" and mask_dict is not None:
-                        out_=output_known_lbs_bboxes['aux_outputs'][i]
-                        l_dict = {}
-                        for loss in self.dn_losses:
-                            l_dict.update(
-                                self.get_loss(loss,
-                                              out_,
-                                              gt_instances=[gt_instances_i],
-                                              indices=exc_idx,
-                                              num_boxes=1 * scalar))
-                        l_dict = {k + f'_dn_{i}': v for k, v in l_dict.items()}
-                        self.losses_dict.update(
-                            {'frame_{}_aux{}_{}'.format(self._current_frame_idx, i, key): value for key, value in
-                            l_dict.items()})
-                    elif self.dn != "no":
-                        l_dict = dict()
-                        l_dict[f'loss_bbox_dn_{i}'] = torch.as_tensor(0.).to(pred_logits_i.device)
-                        l_dict[f'loss_giou_dn_{i}'] = torch.as_tensor(0.).to(pred_logits_i.device)
-                        l_dict[f'loss_ce_dn_{i}'] = torch.as_tensor(0.).to(pred_logits_i.device)
-                        if self.dn == "seg":
-                            l_dict[f'loss_mask_dn_{i}'] = torch.as_tensor(0.).to(pred_logits_i.device)
-                            l_dict[f'loss_dice_dn_{i}'] = torch.as_tensor(0.).to(pred_logits_i.device)
-                        # self.losses.update(l_dict)
-                        self.losses_dict.update(
-                            {'frame_{}_aux{}_{}'.format(self._current_frame_idx, i, key): value for key, value in
-                            l_dict.items()})
-        # interm_outputs loss
+                        {'frame_{}_aux{}_{}'.format(self._current_frame_idx, i, key): value for key, value in
+                         l_dict.items()})
+                    
+                    # Supervising detection queries from the transformer   
+                    if 'interm_outputs' in outputs:
+                        start = 0
+                    else:
+                        start = 1
+                    if i>=start:
+                        if self.dn != "no" and mask_dict is not None:
+                            out_=output_known_lbs_bboxes['aux_outputs'][i]
+                            l_dict = {}
+                            for loss in self.losses:
+                                l_dict.update(
+                                    self.get_loss(loss,
+                                                out_,
+                                                gt_instances=[gt_instances_i],
+                                                indices=exc_idx,
+                                                num_boxes=1 * scalar))
+                            l_dict = {k + f'_dn_{i}': v for k, v in l_dict.items()}
+                            self.losses_dict.update(
+                                {'frame_{}_aux{}_{}'.format(self._current_frame_idx, i, key): value for key, value in
+                                l_dict.items()})
+                        elif self.dn != "no":
+                            l_dict = dict()
+                            l_dict[f'loss_bbox_dn_{i}'] = torch.as_tensor(0.).to(pred_logits_i.device)
+                            l_dict[f'loss_giou_dn_{i}'] = torch.as_tensor(0.).to(pred_logits_i.device)
+                            l_dict[f'loss_ce_dn_{i}'] = torch.as_tensor(0.).to(pred_logits_i.device)
+                            if self.dn == "seg":
+                                l_dict[f'loss_mask_dn_{i}'] = torch.as_tensor(0.).to(pred_logits_i.device)
+                                l_dict[f'loss_dice_dn_{i}'] = torch.as_tensor(0.).to(pred_logits_i.device)
+                            # self.losses.update(l_dict)
+                            self.losses_dict.update(
+                                {'frame_{}_aux{}_{}'.format(self._current_frame_idx, i, key): value for key, value in
+                                l_dict.items()})
+                
+                
+        # Hungarian between GT and prediction indices in two-stage
         if 'interm_outputs' in outputs:
             # print("Full pred_boxes shape:", outputs['interm_outputs']['pred_boxes'].shape)
             interm_outputs = outputs['interm_outputs']
@@ -681,7 +686,7 @@ class ClipMatcher(SetCriterion):
                     'pred_masks': interm_outputs['pred_masks'],
                 }
             interm_matched_indices_layer = match_for_single_decoder_layer(unmatched_outputs_layer_interm, self.matcher)
-            # interm_matched_indices_layer = torch.cat([interm_matched_indices_layer, prev_matched_indices], dim=0)
+            
             for loss in self.losses:
                 l_dict = self.get_loss(loss,
                                        interm_outputs,
@@ -692,7 +697,7 @@ class ClipMatcher(SetCriterion):
                 self.losses_dict.update(
                             {'frame_{}_aux{}_{}'.format(self._current_frame_idx, i, key): value for key, value in
                             l_dict.items()})
-                 
+                
         self._step()
         return track_instances
 
@@ -1136,8 +1141,10 @@ class MOTR(nn.Module):
         # hs, init_reference, inter_references, enc_outputs_class, enc_outputs_coord_unact, memory, multi_level_memory, out_interm, mask_dict = self.transformer(srcs, masks, pos,  targets, ref_pts=None)
         # hs, init_reference, inter_references, out, mask_dict = self.transformer(srcs, masks, pos, embeddings,  targets, ref_pts=None)
 
-        hs, init_reference, inter_references, mask_dict, predictions_class, predictions_mask, interm_outputs = self.transformer(srcs, masks, pos, embeddings, attention_embedding,  targets, track_instances.query_pos, ref_pts=None)
-        
+        # hs, init_reference, inter_references, mask_dict, predictions_class, predictions_mask, interm_outputs = self.transformer(srcs, masks, pos, embeddings, attention_embedding,  targets, track_instances.query_pos, ref_pts=None)
+        hs, init_reference, inter_references, mask_dict, interm_outputs = self.transformer(srcs, masks, pos, embeddings, attention_embedding,  targets, track_instances.query_pos, ref_pts=None)
+        predictions_class = []
+        predictions_mask = []
         for i, output in enumerate(hs):
             outputs_class, outputs_mask = self.forward_prediction_heads(output.transpose(0, 1), attention_embedding, embeddings, self.training or (i == len(hs)-1))
             predictions_class.append(outputs_class)
@@ -1186,11 +1193,11 @@ class MOTR(nn.Module):
         
         out = {
             'pred_logits': predictions_class[-1],
-            'pred_masks': predictions_mask[-1].sigmoid(),
-            # 'pred_masks': predictions_mask[-1],
+            # 'pred_masks': predictions_mask[-1].sigmoid(),
+            'pred_masks': predictions_mask[-1],
             'pred_boxes':out_boxes[-1],
             'aux_outputs': self._set_aux_loss(
-                predictions_class , predictions_mask, out_boxes # Applying sigmoid to the masks
+                predictions_class , predictions_mask, out_boxes
             )
         }
         out['ref_pts'] =  ref_pts_all[5]
@@ -1213,8 +1220,8 @@ class MOTR(nn.Module):
         # max_h, max_w = frame_shape[0], frame_shape[1]
         # pred_masks_interpolated = torch.nn.functional.interpolate(pred_masks.unsqueeze(0), size=(max_h, max_w), mode='nearest').squeeze(0)
         # Filter scores greater than 0.6
-        high_scores = track_scores[track_scores > 0.5]
-        print("Track scores:", high_scores)
+        # high_scores = track_scores[track_scores > 0.8]
+        # print("Track scores:", high_scores)
         track_instances.scores = track_scores
         track_instances.pred_logits = frame_res['pred_logits'][0]
         track_instances.pred_boxes = frame_res['pred_boxes'][0]
@@ -1423,63 +1430,87 @@ def build(args):
     weight_dict = {}
     
     for i in range(num_frames_per_batch):
-        weight_dict.update({
-            f"frame_{i}_loss_ce": args.cls_loss_coef,
-            f"frame_{i}_loss_bbox": args.bbox_loss_coef,
-            f"frame_{i}_loss_giou": args.giou_loss_coef,
-            f"frame_{i}_loss_mask": args.mask_loss_coef,
-            f"frame_{i}_loss_dice": args.dice_loss_coef,
-        })
+        weight_dict.update({"frame_{}_loss_ce".format(i): args.cls_loss_coef,
+                            'frame_{}_loss_bbox'.format(i): args.bbox_loss_coef,
+                            'frame_{}_loss_giou'.format(i): args.giou_loss_coef,
+                            
+                            # (21) Adding masks weight
+                            'frame_{}_loss_mask'.format(i): args.mask_loss_coef,
+                            'frame_{}_loss_dice'.format(i): args.dice_loss_coef,
+                            
+                            })
 
         # Include DN loss weights if DN is enabled
         if args.dn != "no":
-            weight_dict.update({
-                f"frame_{i}_loss_bbox_dn": args.bbox_loss_coef,
-                f"frame_{i}_loss_giou_dn": args.giou_loss_coef,
-                f"frame_{i}_loss_ce_dn": args.cls_loss_coef,
-                f"frame_{i}_loss_mask_dn": args.mask_loss_coef,
-                f"frame_{i}_loss_dice_dn": args.dice_loss_coef,
-            })
+            print('Entered dn in build')
+            weight_dict.update({"frame_{}_loss_ce_dn".format(i): args.cls_loss_coef,
+                                'frame_{}_loss_bbox_dn'.format(i): args.bbox_loss_coef,
+                                'frame_{}_loss_giou_dn'.format(i): args.giou_loss_coef,
+                                
+                                # (21) Adding masks weight
+                                'frame_{}_loss_mask_dn'.format(i): args.mask_loss_coef,
+                                'frame_{}_loss_dice_dn'.format(i): args.dice_loss_coef,
+                                
+                                })
+            
 
-        # Weights for auxiliary and intermediate output losses
-        if args.aux_loss:
-            for j in range(args.dec_layers):
-                # Auxiliary losses for each decoder layer
-                weight_dict.update({
-                    f"frame_{i}_aux{j}_loss_ce_{j}": args.cls_loss_coef,
-                    f"frame_{i}_aux{j}_loss_bbox_{j}": args.bbox_loss_coef,
-                    f"frame_{i}_aux{j}_loss_giou_{j}": args.giou_loss_coef,
-                    f"frame_{i}_aux{j}_loss_mask_{j}": args.mask_loss_coef,
-                    f"frame_{i}_aux{j}_loss_dice_{j}": args.dice_loss_coef,
-                })
-
-                # DN losses for auxiliary outputs
-                if args.dn != "no":
-                    weight_dict.update({
-                        f"frame_{i}_aux{j}_loss_bbox_dn_{j}": args.bbox_loss_coef,
-                        f"frame_{i}_aux{j}_loss_giou_dn_{j}": args.giou_loss_coef,
-                        f"frame_{i}_aux{j}_loss_ce_dn_{j}": args.cls_loss_coef,
-                        f"frame_{i}_aux{j}_loss_mask_dn_{j}": args.mask_loss_coef,
-                        f"frame_{i}_aux{j}_loss_dice_dn_{j}": args.dice_loss_coef,
-                    })
-                    
+    # Weights for auxiliary and intermediate output losses
+    if args.aux_loss:
+        for i in range(num_frames_per_batch):
+            for j in range(args.dec_layers-1):
+                weight_dict.update({'frame_{}_aux{}_loss_ce'.format(i, j): args.cls_loss_coef,
+                                    'frame_{}_aux{}_loss_bbox'.format(i, j): args.bbox_loss_coef,
+                                    'frame_{}_aux{}_loss_giou'.format(i, j): args.giou_loss_coef,
+                                    # (21) Adding mask aux losses
+                                    'frame_{}_aux{}_loss_mask'.format(i, j): args.mask_loss_coef,
+                                    'frame_{}_aux{}_loss_dice'.format(i, j): args.dice_loss_coef,
+                                    })
+                
                 # Interm losses for auxiliary outputs
-                weight_dict.update({
-                    f"frame_{i}_aux{j}_loss_bbox_interm": args.bbox_loss_coef,
-                    f"frame_{i}_aux{j}_loss_giou_interm": args.giou_loss_coef,
-                    f"frame_{i}_aux{j}_loss_ce_interm": args.cls_loss_coef,
-                    f"frame_{i}_aux{j}_loss_mask_interm": args.mask_loss_coef,
-                    f"frame_{i}_aux{j}_loss_dice_interm": args.dice_loss_coef,
-                })
+                weight_dict.update({'frame_{}_aux{}_loss_ce_interm'.format(i, j): args.cls_loss_coef,
+                                    'frame_{}_aux{}_loss_bbox_interm'.format(i, j): args.bbox_loss_coef,
+                                    'frame_{}_aux{}_loss_giou_interm'.format(i, j): args.giou_loss_coef,
+                                    # (21) Adding mask aux losses
+                                    'frame_{}_aux{}_loss_mask_interm'.format(i, j): args.mask_loss_coef,
+                                    'frame_{}_aux{}_loss_dice_interm'.format(i, j): args.dice_loss_coef,
+                                    })
+                
+                # Interm losses for auxiliary outputs
+                weight_dict.update({'frame_{}_aux{}_loss_ce_dn_{}'.format(i, j,j): args.cls_loss_coef,
+                                    'frame_{}_aux{}_loss_bbox_dn_{}'.format(i, j,j): args.bbox_loss_coef,
+                                    'frame_{}_aux{}_loss_giou_dn_{}'.format(i, j,j): args.giou_loss_coef,
+                                    # (21) Adding mask aux losses
+                                    'frame_{}_aux{}_loss_mask_dn_{}'.format(i, j,j): args.mask_loss_coef,
+                                    'frame_{}_aux{}_loss_dice_dn_{}'.format(i, j,j): args.dice_loss_coef,
+                                    })
 
+                
+                    
+    for i in range(num_frames_per_batch):     
         # Intermediate output losses (if applicable)
         weight_dict.update({
-            f"frame_{i}_interm_loss_ce": args.cls_loss_coef,
-            f"frame_{i}_interm_loss_bbox": args.bbox_loss_coef,
-            f"frame_{i}_interm_loss_giou": args.giou_loss_coef,
-            f"frame_{i}_interm_loss_mask": args.mask_loss_coef,
-            f"frame_{i}_interm_loss_dice": args.dice_loss_coef,
-        })
+            'frame_{}_interm_loss_ce'.format(i): args.cls_loss_coef,
+            'frame_{}_interm_loss_bbox'.format(i): args.bbox_loss_coef,
+            'frame_{}_interm_loss_giou'.format(i): args.giou_loss_coef,
+            
+            # (21) Adding masks weight
+            'frame_{}_interm_loss_mask'.format(i): args.mask_loss_coef,
+            'frame_{}_interm_loss_dice'.format(i): args.dice_loss_coef,
+            
+            })
+        
+        # # DN losses for auxiliary outputs
+        # if args.dn != "no":
+        #     weight_dict.update({
+        #         'frame_{}_loss_ce_dn'.format(i): args.cls_loss_coef,
+        #         'frame_{}_loss_bbox_dn'.format(i): args.bbox_loss_coef,
+        #         'frame_{}_loss_giou_dn'.format(i): args.giou_loss_coef,
+                
+        #         # (21) Adding masks weight
+        #         'frame_{}_loss_mask_dn'.format(i): args.mask_loss_coef,
+        #         'frame_{}_loss_dice_dn'.format(i): args.dice_loss_coef,
+                
+        #         })
 
 
     # Optional: Memory bank weights if applicable
@@ -1497,7 +1528,7 @@ def build(args):
     # losses = ['labels', 'boxes']
     losses = ['labels', 'boxes', 'masks']
     importance_sample_ratio = 0.75
-    oversample_ratio = 3.5
+    oversample_ratio = 3.0
     num_points = 12544
     
     dn_losses = []

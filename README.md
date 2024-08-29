@@ -10,7 +10,11 @@ This document outlines the recent enhancements and modifications to the codebase
 - `gen_mask_applemots.py`: Creating RLE mask for more efficient ID assigenment 
 
 ## Transformer Module Enhancements
-- `deformable_transformer_plus.py` : Outputing the feature map from the transformer encoder (memoey) to use it as key for the MHAttention head
+- `deformable_transformer_plus.py` : 
+1. Enabling two-stage detection to initialize positional and content detect queries
+2. Concatenating content and positional detect queries in channel dimension to initialize track queries
+3. Adding denoising queries
+
 
 ## Backbone Modification
 - `joiner`: Adding output_shape function to create a dictionary of resnet different outputs (layer 2, layer 3, layer 4).
@@ -34,6 +38,7 @@ This document outlines the recent enhancements and modifications to the codebase
 7. Adding pred_masks to TrackerPostProcess class 
 8. Adding mask losses and aux_mask_losses in weight_dict in build function
 9. Including masks in losses list in build function
+10. Supervising the prediction in transformer and denoising queries
 
 
 ## Association Modifications

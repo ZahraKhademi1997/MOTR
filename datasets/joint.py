@@ -980,7 +980,9 @@ def make_transforms_for_mots(image_set, args=None):
                     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S%f")
 
                     # Save the image that did not contain any valid bbox after all attempts
-                    save_failed_image_path = "/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR_mask_DN_DAB/output/customcropping"  
+                    save_failed_image_path = os.path.join(args.save_path, 'customcropping')
+                    if not os.path.exists(save_failed_image_path ):
+                        os.mkdir(save_failed_image_path )
                     failed_image_filename = f"failed_image_{img_idx}_{timestamp}.png"  # Include timestamp in the filename
                     failed_image_full_path = os.path.join(save_failed_image_path, failed_image_filename)
 
@@ -992,7 +994,7 @@ def make_transforms_for_mots(image_set, args=None):
             return cropped_images, cropped_targets_list
     ##########################################################################
     
-    save_path = "/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR_mask_DN_DAB/output/data_aug"
+    save_path = os.path.join(args.save_path, 'data_aug')
     if not os.path.exists(save_path):
         os.mkdir(save_path)
     
