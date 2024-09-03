@@ -499,7 +499,7 @@ class DeformableTransformer(nn.Module):
             if self.initialize_box_type != 'no':
                 # convert masks into boxes to better initialize box in the decoder
                 assert self.initial_pred
-                flaten_mask = outputs_mask.detach().sigmoid().flatten(0, 1)
+                flaten_mask = (outputs_mask.detach().sigmoid()>0.6).float().flatten(0, 1) # Using hard thresholded mask to predict boxes
                 h, w = outputs_mask.shape[-2:]
                 if self.initialize_box_type == 'bitmask':  # slower, but more accurate
                     reference_points = BitMasks(flaten_mask > 0).get_bounding_boxes().tensor.to(src_flatten.device)
@@ -545,7 +545,7 @@ class DeformableTransformer(nn.Module):
         # Adding DN training
         tgt_mask = None
         mask_dict = None
-        if self.dn != "no" and self.training:
+        if self.dn is not False and self.training:
             assert targets is not None
             input_query_label, input_query_bbox, tgt_mask, mask_dict = \
                 self.prepare_for_dn(targets, None, None, srcs[0].shape[0]) # tgt_mask = [tgt*tgt]
@@ -553,7 +553,8 @@ class DeformableTransformer(nn.Module):
             if mask_dict is not None:
                 tgt=torch.cat([input_query_label, tgt],dim=1) # content query + content denoising queries (labels)
                 pad_noise_size = input_query_label.shape[1]
-        
+        else:
+            pad_noise_size = 0
         # direct prediction from the matching and denoising part in the begining
         # predictions_class = []
         # predictions_mask = []
@@ -561,16 +562,16 @@ class DeformableTransformer(nn.Module):
         #     outputs_class, outputs_mask = self.forward_prediction_heads(tgt.transpose(0, 1), attention_embedding, embeddings, self.training)
         #     predictions_class.append(outputs_class)
         #     predictions_mask.append(outputs_mask)
-        if self.dn != "no" and self.training and mask_dict is not None:
+        if self.dn is not False and self.training and mask_dict is not None:
             reference_points=torch.cat([input_query_bbox,reference_points],dim=1) # positional query + positional denoising queries (boxes)
             
         
-        assert not torch.isnan(reference_points).any(), "NaN values detected in reference_points general."
-        assert not torch.isnan(reference_points.transpose(0, 1)).any(), "NaN values detected in reference_points transpose general."
-        assert not torch.isnan(tgt).any(), "NaN values detected in tgt general."
-        assert not torch.isnan(memory).any(), "NaN values detected in memory general."
-        assert not torch.isnan(mask_flatten).any(), "NaN values detected in memory_key_padding_mask general."
-        assert not torch.isnan(tgt_mask).any(), "NaN values detected in tgt_mask general."
+        # assert not torch.isnan(reference_points).any(), "NaN values detected in reference_points general."
+        # assert not torch.isnan(reference_points.transpose(0, 1)).any(), "NaN values detected in reference_points transpose general."
+        # assert not torch.isnan(tgt).any(), "NaN values detected in tgt general."
+        # assert not torch.isnan(memory).any(), "NaN values detected in memory general."
+        # assert not torch.isnan(mask_flatten).any(), "NaN values detected in memory_key_padding_mask general."
+        # assert not torch.isnan(tgt_mask).any(), "NaN values detected in tgt_mask general."
         
         # Queries: Detect queries (query selection) + track queries (QIM) + denoising queries (DN)
         hs, inter_references = self.decoder(
@@ -594,6 +595,46 @@ class DeformableTransformer(nn.Module):
         for inter_ref_out in inter_references_out:
             assert not torch.isnan(inter_ref_out).any(), "NaN values detected in inter_ref_out."
         
+        # for i, output in enumerate(hs):
+        #     outputs_class, outputs_mask = self.forward_prediction_heads(output.transpose(0, 1), embeddings, self.training or (i == len(hs)-1))
+        #     # outputs_class, outputs_mask = self.forward_prediction_heads(output.transpose(0, 1), srcs[0], self.training or (i == len(hs)-1))
+        #     predictions_class.append(outputs_class)
+        #     predictions_mask.append(outputs_mask)
+
+        # # iteratively box prediction
+        # if self.initial_pred:
+        #     out_boxes = self.pred_box(inter_references_out, hs, reference_points.sigmoid())
+        #     assert not torch.isnan(out_boxes).any(), "NaN values detected in out_boxes in initial_pred if."
+        #     assert len(predictions_class) == self.num_decoder_layers + 1
+        # else:
+        #     out_boxes = self.pred_box(inter_references_out, hs)
+        #     assert not torch.isnan(out_boxes).any(), "NaN values detected in out_boxes in initial_pred else."
+            
+        # if mask_dict is not None:
+        #     predictions_mask=torch.stack(predictions_mask)
+        #     predictions_class=torch.stack(predictions_class)
+        #     predictions_class, out_boxes,predictions_mask=\
+        #         self.dn_post_process(predictions_class,out_boxes,mask_dict,predictions_mask) # Removing the denoising part
+        #     # print('predictions_mask:', predictions_mask.shape) # torch.Size([7, 1, 300, 168, 233])
+        #     predictions_class,predictions_mask=list(predictions_class),list(predictions_mask)
+            
+        # # elif self.training:  # this is to insure self.label_enc participate in the model
+        # predictions_class[-1] = predictions_class[-1] + 0.0*self.label_enc.weight.sum()
+        # self._value = predictions_class[-1].shape[1]
+        # assert not torch.isnan(out_boxes[-1]).any(), "NaN values detected in out_boxes[-1]."
+        
+        # out = {
+        #     'pred_logits': predictions_class[-1],
+        #     'pred_masks': predictions_mask[-1],
+        #     'pred_boxes':out_boxes[-1],
+        #     'aux_outputs': self._set_aux_loss(
+        #         predictions_class , predictions_mask, out_boxes
+        #     )
+        # }
+        
+        # if self.two_stage:
+        #     out['interm_outputs'] = interm_outputs
+            
         
         if self.two_stage:
             # return hs, reference_points, inter_references_out, mask_dict, predictions_class, predictions_mask, interm_outputs
@@ -1171,19 +1212,43 @@ class DeformableTransformerDecoderLayer(nn.Module):
         tgt = tgt + self.dropout2(tgt2)
         return self.norm2(tgt)
 
+    # def _forward_track_attn(self, tgt, query_pos, pad_noise_size):
+    #     q = k = self.with_pos_embed(tgt, query_pos)
+
+    #     # Total queries minus padding size to isolate the region without padding
+    #     total_queries = tgt.shape[0] - pad_noise_size
+
+    #     if total_queries > 300:  # Ensure there are track queries beyond the initial 300
+    #         # Update attention for track queries (from index 300 to the end of actual track queries)
+    #         tgt2 = self.update_attn(q[:, 300:total_queries].transpose(0, 1),
+    #                                 k[:, 300:total_queries].transpose(0, 1),
+    #                                 tgt[:, 300:total_queries].transpose(0, 1))[0].transpose(0, 1)
+    #         tgt = torch.cat([tgt[:, :300], self.norm4(tgt[:, 300:total_queries] + self.dropout5(tgt2)), tgt[:, total_queries:]], dim=1)
+
+    #     return tgt
+    
+    # def _forward_track_attn(self, tgt, query_pos, pad_noise_size):
+    #     q = k = self.with_pos_embed(tgt, query_pos)
+
+    #     # Total queries minus padding size to isolate the region without padding
+    #     total_queries = tgt.shape[0] - pad_noise_size
+
+    #     if total_queries > 100:  # Ensure there are track queries beyond the initial 300
+    #         # Update attention for track queries (from index 300 to the end of actual track queries)
+    #         tgt2 = self.update_attn(q[:, 100:total_queries].transpose(0, 1),
+    #                                 k[:, 100:total_queries].transpose(0, 1),
+    #                                 tgt[:, 100:total_queries].transpose(0, 1))[0].transpose(0, 1)
+    #         tgt = torch.cat([tgt[:, :100], self.norm4(tgt[:, 100:total_queries] + self.dropout5(tgt2)), tgt[:, total_queries:]], dim=1)
+
+    #     return tgt
+    
     def _forward_track_attn(self, tgt, query_pos, pad_noise_size):
         q = k = self.with_pos_embed(tgt, query_pos)
-
-        # Total queries minus padding size to isolate the region without padding
-        total_queries = tgt.shape[0] - pad_noise_size
-
-        if total_queries > 100:  # Ensure there are track queries beyond the initial 300
-            # Update attention for track queries (from index 300 to the end of actual track queries)
-            tgt2 = self.update_attn(q[:, 100:total_queries].transpose(0, 1),
-                                    k[:, 100:total_queries].transpose(0, 1),
-                                    tgt[:, 100:total_queries].transpose(0, 1))[0].transpose(0, 1)
-            tgt = torch.cat([tgt[:, :100], self.norm4(tgt[:, 100:total_queries] + self.dropout5(tgt2)), tgt[:, total_queries:]], dim=1)
-
+        if q.shape[1] > 100:
+            tgt2 = self.update_attn(q[:, 100:].transpose(0, 1),
+                                    k[:, 100:].transpose(0, 1),
+                                    tgt[:, 100:].transpose(0, 1))[0].transpose(0, 1)
+            tgt = torch.cat([tgt[:, :100],self.norm4(tgt[:, 100:]+self.dropout5(tgt2))], dim=1)
         return tgt
 
 

@@ -55,7 +55,7 @@ class ClipMatcher(SetCriterion):
                         oversample_ratio,
                         importance_sample_ratio,
                         dn_losses=[],
-                        dn=True,
+                        dn=False,
                         ):
         """ Create the criterion.
         Parameters:
@@ -399,7 +399,7 @@ class ClipMatcher(SetCriterion):
         gt_instances_i = self.gt_instances[self._current_frame_idx]  # gt instances of i-th image.
         
         # Retrieve the matching between the outputs of the last layer and the targets
-        if self.dn is not "no" and mask_dict is not None:
+        if self.dn is not False and mask_dict is not None:
             output_known_lbs_bboxes,num_tgt,single_pad,scalar = self.prep_for_dn(mask_dict)
             exc_idx = []
             
@@ -419,8 +419,6 @@ class ClipMatcher(SetCriterion):
         pred_logits_i = track_instances.pred_logits  # predicted logits of i-th image.
         pred_boxes_i = track_instances.pred_boxes  # predicted boxes of i-th image.
         assert not torch.isnan(pred_boxes_i).any(), "NaN found in pred_boxes_i in MOTR"
-        
-        # (11) Adding pred_masks
         pred_masks_i = track_instances.pred_masks  # predicted masks of i-th image.
         
         obj_idxes = gt_instances_i.obj_ids
@@ -429,8 +427,6 @@ class ClipMatcher(SetCriterion):
         outputs_i = {
             'pred_logits': pred_logits_i.unsqueeze(0),
             'pred_boxes': pred_boxes_i.unsqueeze(0),
-            
-            # (12) Adding pred_masks
             'pred_masks': pred_masks_i.unsqueeze(0),
             
         }
@@ -573,7 +569,10 @@ class ClipMatcher(SetCriterion):
         active_track_masks_primarly = track_instances.pred_masks[active_idxes]
         if len(active_track_masks_primarly) > 0: 
             gt_masks = gt_instances_i.masks[track_instances.matched_gt_idxes[active_idxes]].float()
-            plot_and_save_masks(active_idxes, track_instances.pred_masks, gt_masks, gt_boxes, active_track_boxes, '/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR_mask_DN_DAB/output/criterion')
+            # save_dir = os.path.join(args.save_path, 'criterion')
+            # if not os.path.exists(save_dir):
+            #     os.mkdir(save_dir)
+            plot_and_save_masks(active_idxes, track_instances.pred_masks, gt_masks, gt_boxes, active_track_boxes, '/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR-mask-DN-DAB-Track-MOTS/output/criterion_seg_pretrained')
 
         # active_track_masks = active_track_masks.sigmoid()
         # step7. merge the unmatched pairs and the matched pairs.
@@ -583,7 +582,8 @@ class ClipMatcher(SetCriterion):
         self.num_samples += len(gt_instances_i) + num_disappear_track
         self.sample_device = pred_logits_i.device
         
-                 # Loss calculation for Hungarian between matched indices
+        
+        # Loss calculation for Hungarian between matched indices
         for loss in self.losses:
             new_track_loss = self.get_loss(loss,
                                            outputs=outputs_i,
@@ -606,17 +606,17 @@ class ClipMatcher(SetCriterion):
                 self.losses_dict.update(
                     {'frame_{}_{}_dn'.format(self._current_frame_idx, key): value for key, value in dn_loss.items()})
             
-        # elif self.dn != "no":
-        #     l_dict = dict()
-        #     l_dict['loss_bbox_dn'] = torch.as_tensor(0.).to(pred_logits_i.device)
-        #     l_dict['loss_giou_dn'] = torch.as_tensor(0.).to(pred_logits_i.device)
-        #     l_dict['loss_ce_dn'] = torch.as_tensor(0.).to(pred_logits_i.device)
-        #     if self.dn == "seg":
-        #         l_dict['loss_mask_dn'] = torch.as_tensor(0.).to(pred_logits_i.device)
-        #         l_dict['loss_dice_dn'] = torch.as_tensor(0.).to(pred_logits_i.device)
-        #     self.losses_dict.update(
-        #         {'frame_{}_aux{}_{}'.format(self._current_frame_idx, i, key): value for key, value in
-        #         l_dict.items()})
+        elif self.dn != "no":
+            l_dict = dict()
+            l_dict['loss_bbox_dn'] = torch.as_tensor(0.).to(pred_logits_i.device)
+            l_dict['loss_giou_dn'] = torch.as_tensor(0.).to(pred_logits_i.device)
+            l_dict['loss_ce_dn'] = torch.as_tensor(0.).to(pred_logits_i.device)
+            if self.dn == "seg":
+                l_dict['loss_mask_dn'] = torch.as_tensor(0.).to(pred_logits_i.device)
+                l_dict['loss_dice_dn'] = torch.as_tensor(0.).to(pred_logits_i.device)
+            self.losses_dict.update(
+                {'frame_{}_aux{}_{}'.format(self._current_frame_idx, i, key): value for key, value in
+                l_dict.items()})
 
 
         # Hungarian between Aux indices
@@ -649,6 +649,10 @@ class ClipMatcher(SetCriterion):
                         start = 1
                     if i>=start:
                         if self.dn != "no" and mask_dict is not None:
+                            # output_dir="/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR-mask-DN-DAB-Track-MOTS/outputs/output_known_lbs_bboxes.txt"
+                            # with open(output_dir, 'w') as f:
+                            #     f.write(str(output_known_lbs_bboxes))
+                                
                             out_=output_known_lbs_bboxes['aux_outputs'][i]
                             l_dict = {}
                             for loss in self.losses:
@@ -676,7 +680,7 @@ class ClipMatcher(SetCriterion):
                                 l_dict.items()})
                 
                 
-        # Hungarian between GT and prediction indices in two-stage
+        # # Hungarian between GT and prediction indices in two-stage
         if 'interm_outputs' in outputs:
             # print("Full pred_boxes shape:", outputs['interm_outputs']['pred_boxes'].shape)
             interm_outputs = outputs['interm_outputs']
@@ -697,7 +701,7 @@ class ClipMatcher(SetCriterion):
                 self.losses_dict.update(
                             {'frame_{}_aux{}_{}'.format(self._current_frame_idx, i, key): value for key, value in
                             l_dict.items()})
-                
+              
         self._step()
         return track_instances
 
@@ -1143,6 +1147,7 @@ class MOTR(nn.Module):
 
         # hs, init_reference, inter_references, mask_dict, predictions_class, predictions_mask, interm_outputs = self.transformer(srcs, masks, pos, embeddings, attention_embedding,  targets, track_instances.query_pos, ref_pts=None)
         hs, init_reference, inter_references, mask_dict, interm_outputs = self.transformer(srcs, masks, pos, embeddings, attention_embedding,  targets, track_instances.query_pos, ref_pts=None)
+       
         predictions_class = []
         predictions_mask = []
         for i, output in enumerate(hs):
@@ -1162,15 +1167,16 @@ class MOTR(nn.Module):
         if mask_dict is not None:
             predictions_mask=torch.stack(predictions_mask)
             predictions_class=torch.stack(predictions_class)
+            
             predictions_class, out_boxes,predictions_mask=\
                 self.dn_post_process(predictions_class,out_boxes,mask_dict,predictions_mask) # Removing the denoising part
             predictions_class,predictions_mask=list(predictions_class),list(predictions_mask)
-            
-        predictions_class[-1] = predictions_class[-1] + 0.0*self.transformer.label_enc.weight.sum()
+        elif self.training:    
+            predictions_class[-1] = predictions_class[-1] + 0.0*self.transformer.label_enc.weight.sum()
         assert not torch.isnan(out_boxes[-1]).any(), "NaN values detected in out_boxes[-1]."
         
         
-        hs  = torch.cat(hs, dim=0).unsqueeze(1)
+        hs  = torch.cat(hs, dim=0).unsqueeze(1) # (6 layers of decoder, combination of all queries, embedding dimension), torch.Size([6, 1, 400, 256])
         inter_references = torch.cat(inter_references, dim=0).unsqueeze(1)
         
         for lvl in range(hs.shape[0]):
@@ -1190,14 +1196,14 @@ class MOTR(nn.Module):
     
         
         # out = {'pred_logits': out_interm["pred_logits"], 'pred_boxes': out_interm["pred_boxes"], 'ref_pts': ref_pts_all[5], 'pred_masks': out_interm["pred_masks"]}
-        
+
         out = {
             'pred_logits': predictions_class[-1],
-            # 'pred_masks': predictions_mask[-1].sigmoid(),
-            'pred_masks': predictions_mask[-1],
+            'pred_masks': predictions_mask[-1].sigmoid(),
+            # 'pred_masks': predictions_mask[-1],
             'pred_boxes':out_boxes[-1],
             'aux_outputs': self._set_aux_loss(
-                predictions_class , predictions_mask, out_boxes
+                predictions_class , predictions_mask, out_boxes # Applying sigmoid to the masks
             )
         }
         out['ref_pts'] =  ref_pts_all[5]
@@ -1220,8 +1226,8 @@ class MOTR(nn.Module):
         # max_h, max_w = frame_shape[0], frame_shape[1]
         # pred_masks_interpolated = torch.nn.functional.interpolate(pred_masks.unsqueeze(0), size=(max_h, max_w), mode='nearest').squeeze(0)
         # Filter scores greater than 0.6
-        # high_scores = track_scores[track_scores > 0.8]
-        # print("Track scores:", high_scores)
+        high_scores = track_scores[track_scores > 0.5]
+        print("Track scores:", high_scores)
         track_instances.scores = track_scores
         track_instances.pred_logits = frame_res['pred_logits'][0]
         track_instances.pred_boxes = frame_res['pred_boxes'][0]
@@ -1499,18 +1505,19 @@ def build(args):
             
             })
         
-        # # DN losses for auxiliary outputs
-        # if args.dn != "no":
-        #     weight_dict.update({
-        #         'frame_{}_loss_ce_dn'.format(i): args.cls_loss_coef,
-        #         'frame_{}_loss_bbox_dn'.format(i): args.bbox_loss_coef,
-        #         'frame_{}_loss_giou_dn'.format(i): args.giou_loss_coef,
+        # DN losses for auxiliary outputs
+        if args.dn != "no":
+            weight_dict.update({
+                'frame_{}_loss_ce_dn'.format(i): args.cls_loss_coef,
+                'frame_{}_loss_bbox_dn'.format(i): args.bbox_loss_coef,
+                'frame_{}_loss_giou_dn'.format(i): args.giou_loss_coef,
                 
-        #         # (21) Adding masks weight
-        #         'frame_{}_loss_mask_dn'.format(i): args.mask_loss_coef,
-        #         'frame_{}_loss_dice_dn'.format(i): args.dice_loss_coef,
+                # (21) Adding masks weight
+                'frame_{}_loss_mask_dn'.format(i): args.mask_loss_coef,
+                'frame_{}_loss_dice_dn'.format(i): args.dice_loss_coef,
                 
-        #         })
+                })
+        
 
 
     # Optional: Memory bank weights if applicable
@@ -1523,16 +1530,16 @@ def build(args):
     else:
         memory_bank = None
 
-        
+    # print('weight_dict:', weight_dict)
     # (22) Including masks
     # losses = ['labels', 'boxes']
     losses = ['labels', 'boxes', 'masks']
     importance_sample_ratio = 0.75
-    oversample_ratio = 3.0
+    oversample_ratio = 3.5
     num_points = 12544
     
     dn_losses = []
-    dn = "yes"
+    dn = True
     initial_pred = True
 
     criterion = ClipMatcher(num_classes, matcher=img_matcher, weight_dict=weight_dict, losses=losses, num_points = num_points, oversample_ratio = oversample_ratio, importance_sample_ratio = importance_sample_ratio, dn_losses = dn_losses, dn = dn)
