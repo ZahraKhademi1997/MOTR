@@ -519,7 +519,6 @@ class DeformableTransformer(nn.Module):
             positional_query = self.reference_point_transform(reference_points_flat)
             
             cat_queries = torch.cat([tgt.squeeze(0), positional_query], dim=-1)
-            # cat_queries = torch.cat([tgt.squeeze(0), reference_points.squeeze(0)], dim=-1)
             
             self.init_det = nn.Parameter(cat_queries)
             #####################################################################################################
