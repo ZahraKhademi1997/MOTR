@@ -44,6 +44,9 @@ from torch.nn.init import xavier_uniform_
 import torch.nn.init as init
 from util.FPN_encoder import FPNEncoder
 from util.misc import inverse_sigmoid
+import os
+os.environ['TORCH_USE_CUDA_DSA'] = '1'
+
 
 
 class ClipMatcher(SetCriterion):
@@ -55,7 +58,7 @@ class ClipMatcher(SetCriterion):
                         oversample_ratio,
                         importance_sample_ratio,
                         dn_losses=[],
-                        dn=False,
+                        dn=True,
                         ):
         """ Create the criterion.
         Parameters:
@@ -156,8 +159,6 @@ class ClipMatcher(SetCriterion):
         filtered_idx = []
         for src_per_img, tgt_per_img in indices:
             keep = tgt_per_img != -1
-            # print('src_per_img:', src_per_img, 'tgt_per_img:', tgt_per_img)
-            # print('Filtered src_per_img:', src_per_img[keep], 'Filtered tgt_per_img:', tgt_per_img[keep])
             filtered_idx.append((src_per_img[keep], tgt_per_img[keep]))
         indices = filtered_idx
         idx = self._get_src_permutation_idx(indices)
@@ -226,6 +227,21 @@ class ClipMatcher(SetCriterion):
 
         src_idx = self._get_src_permutation_idx(indices)
         tgt_idx = self._get_tgt_permutation_idx(indices)
+        
+        # filtered_idx = []
+        # for src_per_img, tgt_per_img in indices:
+        #     keep = tgt_per_img != -1
+        #     filtered_idx.append((src_per_img[keep], tgt_per_img[keep]))
+        # indices = filtered_idx
+        # idx = self._get_src_permutation_idx(indices)
+        # src_boxes = outputs['pred_boxes'][idx]
+        # target_boxes = torch.cat([gt_per_img.boxes[i] for gt_per_img, (_, i) in zip(gt_instances, indices)], dim=0)
+
+        # # for pad target, don't calculate regression loss, judged by whether obj_id=-1
+        # target_obj_ids = torch.cat([gt_per_img.obj_ids[i] for gt_per_img, (_, i) in zip(gt_instances, indices)], dim=0) # size(16)
+        # mask = (target_obj_ids != -1)
+        
+        
         src_masks = outputs["pred_masks"]
         src_masks = src_masks[src_idx]
         # masks = [t["masks"] for t in targets]
@@ -379,6 +395,45 @@ class ClipMatcher(SetCriterion):
         del target_masks
         return losses
     
+    
+    # Autoencoder Loss
+    def autoencoder_loss(self, reconstructed, gt_instances: List[Instances], indices: List[tuple], num_boxes):
+        """
+        Calculate the mean squared error loss between the original and reconstructed bounding boxes.
+
+        Parameters:
+            reconstructed (torch.Tensor): The reconstructed bounding boxes from the autoencoder, shape (batch_size, num_boxes, 4)
+            gt_instances (List[Instances]): The ground truth instances, which include bounding boxes.
+            indices (List[tuple]): The matching indices from Hungarian algorithm.
+            num_boxes (int): The total number of boxes.
+
+        Returns:
+            torch.Tensor: The computed MSE loss.
+        """
+        # Iterate over the list of tuples containing prediction and GT indices
+        for (pred_indices, gt_indices) in indices:
+            # print(f"Prediction Indices: {pred_indices}")
+            # print(f"Ground Truth Indices: {gt_indices}")
+
+            # Now you can use pred_indices and gt_indices to index into reconstructed and gt_instances
+            pred_boxes = reconstructed['reconstructed_ref_points'].sigmoid().squeeze(0)
+            pred_boxes = pred_boxes[pred_indices]  # Access the predicted boxes
+            # gt_boxes = torch.cat([gt_per_img.boxes[i] for gt_per_img, i in zip(gt_instances, gt_indices)], dim=0)  # Access GT boxes
+            gt_boxes = torch.cat([gt_per_img.boxes[i] for gt_per_img, (_, i) in zip(gt_instances, indices)], dim=0)
+            # print('pred_boxes:', pred_boxes.shape, 'gt_boxes:', gt_boxes.shape)
+            # Compute MSE loss between predicted and GT boxes (reduction='sum' over individual elements)
+            loss_ae = F.mse_loss(pred_boxes, gt_boxes, reduction='none')
+
+
+        # Normalize the total loss by the number of boxes
+        loss = loss_ae.sum() / num_boxes
+
+        losses = {}
+        losses['loss_ae'] = loss  
+
+        return losses
+        
+    
     # Add DN for the train
     def prep_for_dn(self,mask_dict):
         output_known_lbs_bboxes = mask_dict['output_known_lbs_bboxes']
@@ -419,6 +474,8 @@ class ClipMatcher(SetCriterion):
         pred_logits_i = track_instances.pred_logits  # predicted logits of i-th image.
         pred_boxes_i = track_instances.pred_boxes  # predicted boxes of i-th image.
         assert not torch.isnan(pred_boxes_i).any(), "NaN found in pred_boxes_i in MOTR"
+        
+        # (11) Adding pred_masks
         pred_masks_i = track_instances.pred_masks  # predicted masks of i-th image.
         
         obj_idxes = gt_instances_i.obj_ids
@@ -427,6 +484,8 @@ class ClipMatcher(SetCriterion):
         outputs_i = {
             'pred_logits': pred_logits_i.unsqueeze(0),
             'pred_boxes': pred_boxes_i.unsqueeze(0),
+            
+            # (12) Adding pred_masks
             'pred_masks': pred_masks_i.unsqueeze(0),
             
         }
@@ -468,16 +527,33 @@ class ClipMatcher(SetCriterion):
         def match_for_single_decoder_layer(unmatched_outputs, matcher):
             new_track_indices = matcher(unmatched_outputs,
                                              [untracked_gt_instances])  # list[tuple(src_idx, tgt_idx)]
-
+            
             src_idx = new_track_indices[0][0]
             tgt_idx = new_track_indices[0][1]
+    
             # concat src and tgt.
-            
             # (13) Solving device problem in qim
             # new_matched_indices = torch.stack([unmatched_track_idxes[src_idx], untracked_tgt_indexes[tgt_idx]],
             #                                   dim=1).to(pred_logits_i.device)
             new_matched_indices = torch.stack([unmatched_track_idxes[src_idx], untracked_tgt_indexes[tgt_idx]],
                                               dim=1)
+            return new_matched_indices
+        
+        def match_for_single_decoder_layer_AE(unmatched_outputs, matcher):
+            # assert not unmatched_outputs['pred_boxes'].shape[1] !=100, f"Error: unmatched_outputs first dimension should not be 100, but got {unmatched_outputs['pred_boxes'].shape[1]}"
+            new_track_indices = matcher(unmatched_outputs,
+                                             [untracked_gt_instances])  # list[tuple(src_idx, tgt_idx)]
+            
+            src_idx = new_track_indices[0][0]
+            tgt_idx = new_track_indices[0][1]
+            # Ensure src_idx and tgt_idx are not empty
+            # Create dynamic indices based on the number of unmatched outputs
+            unmatched_reconstruct_idxes = torch.arange(unmatched_outputs['pred_boxes'].shape[1], device=pred_logits_i.device, dtype=torch.int64)
+            
+            # concat src and tgt.
+            new_matched_indices = torch.stack([unmatched_reconstruct_idxes[src_idx], untracked_tgt_indexes[tgt_idx]],
+                                              dim=1).to(pred_logits_i.device)
+                                              
             return new_matched_indices
 
         # step4. do matching between the unmatched slots and GTs.
@@ -510,12 +586,10 @@ class ClipMatcher(SetCriterion):
             # (17) Adding active track masks
             # track_instances.iou[active_idxes] = matched_boxlist_iou(Boxes(active_track_boxes), Boxes(gt_boxes))
             track_instances.iou_boxes[active_idxes] = matched_boxlist_iou(Boxes(active_track_boxes), Boxes(gt_boxes))
-           
-            
+
             # gt_masks_to_boxes = box_ops.box_cxcywh_to_xyxy(masks_to_boxes(gt_masks.float())).to(active_track_masks.device)
             # active_track_masks_to_boxes = box_ops.box_cxcywh_to_xyxy(masks_to_boxes(active_track_masks)).to(active_track_masks.device)
             # track_instances.iou_masks[active_idxes] = matched_boxlist_iou(Boxes(active_track_masks_to_boxes), Boxes(gt_masks_to_boxes))
-        
        
         def plot_and_save_masks(active_idxes, predicted_masks, ground_truth_masks, active_gt_boxes, active_predicted_boxes, output_dir):
             # active_predictions = predicted_masks[active_idxes].detach().sigmoid()
@@ -569,21 +643,17 @@ class ClipMatcher(SetCriterion):
         active_track_masks_primarly = track_instances.pred_masks[active_idxes]
         if len(active_track_masks_primarly) > 0: 
             gt_masks = gt_instances_i.masks[track_instances.matched_gt_idxes[active_idxes]].float()
-            # save_dir = os.path.join(args.save_path, 'criterion')
-            # if not os.path.exists(save_dir):
-            #     os.mkdir(save_dir)
-            plot_and_save_masks(active_idxes, track_instances.pred_masks, gt_masks, gt_boxes, active_track_boxes, '/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR-mask-DN-DAB-Track-MOTS/output/criterion_seg_pretrained')
+            plot_and_save_masks(active_idxes, track_instances.pred_masks, gt_masks, gt_boxes, active_track_boxes, '/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR_mask_DN_DAB/output/criterion_AE')
 
         # active_track_masks = active_track_masks.sigmoid()
         # step7. merge the unmatched pairs and the matched pairs.
         matched_indices = torch.cat([new_matched_indices, prev_matched_indices], dim=0)
-
+        
         # step8. calculate losses.
         self.num_samples += len(gt_instances_i) + num_disappear_track
         self.sample_device = pred_logits_i.device
         
-        
-        # Loss calculation for Hungarian between matched indices
+                 # Loss calculation for Hungarian between matched indices
         for loss in self.losses:
             new_track_loss = self.get_loss(loss,
                                            outputs=outputs_i,
@@ -606,7 +676,7 @@ class ClipMatcher(SetCriterion):
                 self.losses_dict.update(
                     {'frame_{}_{}_dn'.format(self._current_frame_idx, key): value for key, value in dn_loss.items()})
             
-        elif self.dn != "no":
+        elif self.dn is not False:
             l_dict = dict()
             l_dict['loss_bbox_dn'] = torch.as_tensor(0.).to(pred_logits_i.device)
             l_dict['loss_giou_dn'] = torch.as_tensor(0.).to(pred_logits_i.device)
@@ -649,10 +719,6 @@ class ClipMatcher(SetCriterion):
                         start = 1
                     if i>=start:
                         if self.dn != "no" and mask_dict is not None:
-                            # output_dir="/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR-mask-DN-DAB-Track-MOTS/outputs/output_known_lbs_bboxes.txt"
-                            # with open(output_dir, 'w') as f:
-                            #     f.write(str(output_known_lbs_bboxes))
-                                
                             out_=output_known_lbs_bboxes['aux_outputs'][i]
                             l_dict = {}
                             for loss in self.losses:
@@ -680,7 +746,7 @@ class ClipMatcher(SetCriterion):
                                 l_dict.items()})
                 
                 
-        # # Hungarian between GT and prediction indices in two-stage
+        # Hungarian between GT and prediction indices in two-stage
         if 'interm_outputs' in outputs:
             # print("Full pred_boxes shape:", outputs['interm_outputs']['pred_boxes'].shape)
             interm_outputs = outputs['interm_outputs']
@@ -701,7 +767,28 @@ class ClipMatcher(SetCriterion):
                 self.losses_dict.update(
                             {'frame_{}_aux{}_{}'.format(self._current_frame_idx, i, key): value for key, value in
                             l_dict.items()})
-              
+           
+               
+        # Calculating reconstruction loss for reference_points
+        if 'output_autoencoder' in outputs:
+            output_autoencoder = outputs['output_autoencoder']
+            reconstructed_points = {
+                'pred_boxes' : output_autoencoder['reconstructed_ref_points'].sigmoid(),
+            }
+            # original_points = outputs['output_autoencoder']['original_ref_points']
+            
+            ae_matched_indices_layer = match_for_single_decoder_layer_AE(reconstructed_points, self.matcher)
+
+            # Calculate the autoencoder loss
+            ae_loss_dict = self.autoencoder_loss(output_autoencoder, 
+                                                gt_instances=[gt_instances_i],
+                                                indices=[(ae_matched_indices_layer[:, 0], ae_matched_indices_layer[:, 1])],
+                                                num_boxes=1)
+
+            # Update the losses dictionary with autoencoder loss for the current frame
+            for key, value in ae_loss_dict.items():
+                self.losses_dict.update({'frame_{}_AE_{}'.format(self._current_frame_idx, key): value})
+            
         self._step()
         return track_instances
 
@@ -1146,8 +1233,7 @@ class MOTR(nn.Module):
         # hs, init_reference, inter_references, out, mask_dict = self.transformer(srcs, masks, pos, embeddings,  targets, ref_pts=None)
 
         # hs, init_reference, inter_references, mask_dict, predictions_class, predictions_mask, interm_outputs = self.transformer(srcs, masks, pos, embeddings, attention_embedding,  targets, track_instances.query_pos, ref_pts=None)
-        hs, init_reference, inter_references, mask_dict, interm_outputs = self.transformer(srcs, masks, pos, embeddings, attention_embedding,  targets, track_instances.query_pos, ref_pts=None)
-       
+        hs, init_reference, inter_references, mask_dict, interm_outputs, output_autoencoder = self.transformer(srcs, masks, pos, embeddings, attention_embedding,  targets, track_instances.query_pos, ref_pts=None)
         predictions_class = []
         predictions_mask = []
         for i, output in enumerate(hs):
@@ -1167,16 +1253,15 @@ class MOTR(nn.Module):
         if mask_dict is not None:
             predictions_mask=torch.stack(predictions_mask)
             predictions_class=torch.stack(predictions_class)
-            
             predictions_class, out_boxes,predictions_mask=\
                 self.dn_post_process(predictions_class,out_boxes,mask_dict,predictions_mask) # Removing the denoising part
             predictions_class,predictions_mask=list(predictions_class),list(predictions_mask)
-        elif self.training:    
-            predictions_class[-1] = predictions_class[-1] + 0.0*self.transformer.label_enc.weight.sum()
+            
+        predictions_class[-1] = predictions_class[-1] + 0.0*self.transformer.label_enc.weight.sum()
         assert not torch.isnan(out_boxes[-1]).any(), "NaN values detected in out_boxes[-1]."
         
         
-        hs  = torch.cat(hs, dim=0).unsqueeze(1) # (6 layers of decoder, combination of all queries, embedding dimension), torch.Size([6, 1, 400, 256])
+        hs  = torch.cat(hs, dim=0).unsqueeze(1)
         inter_references = torch.cat(inter_references, dim=0).unsqueeze(1)
         
         for lvl in range(hs.shape[0]):
@@ -1185,7 +1270,7 @@ class MOTR(nn.Module):
             else:
                 reference = inter_references[lvl - 1]
             reference = inverse_sigmoid(reference)
-            tmp = self.bbox_embed[lvl](hs[lvl])
+            tmp = self.transformer.bbox_embed[lvl](hs[lvl])
             if reference.shape[-1] == 4:
                 tmp += reference
             else:
@@ -1196,18 +1281,19 @@ class MOTR(nn.Module):
     
         
         # out = {'pred_logits': out_interm["pred_logits"], 'pred_boxes': out_interm["pred_boxes"], 'ref_pts': ref_pts_all[5], 'pred_masks': out_interm["pred_masks"]}
-
+        
         out = {
             'pred_logits': predictions_class[-1],
-            'pred_masks': predictions_mask[-1].sigmoid(),
-            # 'pred_masks': predictions_mask[-1],
+            # 'pred_masks': predictions_mask[-1].sigmoid(),
+            'pred_masks': predictions_mask[-1],
             'pred_boxes':out_boxes[-1],
             'aux_outputs': self._set_aux_loss(
-                predictions_class , predictions_mask, out_boxes # Applying sigmoid to the masks
+                predictions_class , predictions_mask, out_boxes
             )
         }
         out['ref_pts'] =  ref_pts_all[5]
-        out['interm_outputs'] = interm_outputs # query selection from different transformer layers
+        out['interm_outputs'] = interm_outputs # query selection from encoder
+        out['output_autoencoder'] = output_autoencoder # Reconstructing 4D boxes from higher dimension
         
         return out, mask_dict
     
@@ -1226,8 +1312,8 @@ class MOTR(nn.Module):
         # max_h, max_w = frame_shape[0], frame_shape[1]
         # pred_masks_interpolated = torch.nn.functional.interpolate(pred_masks.unsqueeze(0), size=(max_h, max_w), mode='nearest').squeeze(0)
         # Filter scores greater than 0.6
-        high_scores = track_scores[track_scores > 0.5]
-        print("Track scores:", high_scores)
+        # high_scores = track_scores[track_scores > 0.8]
+        # print("Track scores:", high_scores)
         track_instances.scores = track_scores
         track_instances.pred_logits = frame_res['pred_logits'][0]
         track_instances.pred_boxes = frame_res['pred_boxes'][0]
@@ -1447,8 +1533,7 @@ def build(args):
                             })
 
         # Include DN loss weights if DN is enabled
-        if args.dn != "no":
-            print('Entered dn in build')
+        if args.dn is not False:
             weight_dict.update({"frame_{}_loss_ce_dn".format(i): args.cls_loss_coef,
                                 'frame_{}_loss_bbox_dn'.format(i): args.bbox_loss_coef,
                                 'frame_{}_loss_giou_dn'.format(i): args.giou_loss_coef,
@@ -1505,19 +1590,25 @@ def build(args):
             
             })
         
-        # DN losses for auxiliary outputs
-        if args.dn != "no":
-            weight_dict.update({
-                'frame_{}_loss_ce_dn'.format(i): args.cls_loss_coef,
-                'frame_{}_loss_bbox_dn'.format(i): args.bbox_loss_coef,
-                'frame_{}_loss_giou_dn'.format(i): args.giou_loss_coef,
-                
-                # (21) Adding masks weight
-                'frame_{}_loss_mask_dn'.format(i): args.mask_loss_coef,
-                'frame_{}_loss_dice_dn'.format(i): args.dice_loss_coef,
-                
-                })
+    for i in range(num_frames_per_batch):     
+        # AE losses (if applicable)
+        weight_dict.update({
+            'frame_{}_AE_loss_ae'.format(i): args.ae_loss_coef,
+            
+            })
         
+        # # DN losses for auxiliary outputs
+        # if args.dn != "no":
+        #     weight_dict.update({
+        #         'frame_{}_loss_ce_dn'.format(i): args.cls_loss_coef,
+        #         'frame_{}_loss_bbox_dn'.format(i): args.bbox_loss_coef,
+        #         'frame_{}_loss_giou_dn'.format(i): args.giou_loss_coef,
+                
+        #         # (21) Adding masks weight
+        #         'frame_{}_loss_mask_dn'.format(i): args.mask_loss_coef,
+        #         'frame_{}_loss_dice_dn'.format(i): args.dice_loss_coef,
+                
+        #         })
 
 
     # Optional: Memory bank weights if applicable
@@ -1530,16 +1621,16 @@ def build(args):
     else:
         memory_bank = None
 
-    # print('weight_dict:', weight_dict)
+        
     # (22) Including masks
     # losses = ['labels', 'boxes']
     losses = ['labels', 'boxes', 'masks']
     importance_sample_ratio = 0.75
-    oversample_ratio = 3.5
+    oversample_ratio = 3.0
     num_points = 12544
     
     dn_losses = []
-    dn = True
+    dn = "yes"
     initial_pred = True
 
     criterion = ClipMatcher(num_classes, matcher=img_matcher, weight_dict=weight_dict, losses=losses, num_points = num_points, oversample_ratio = oversample_ratio, importance_sample_ratio = importance_sample_ratio, dn_losses = dn_losses, dn = dn)

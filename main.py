@@ -33,6 +33,10 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from torch.utils.tensorboard import SummaryWriter
+from sklearn.model_selection import KFold
+from util.set_epoch import CustomSubset
+import os
+os.environ['TORCH_USE_CUDA_DSA'] = '1'
 
 
 
@@ -116,6 +120,10 @@ def get_args_parser():
     
     parser.add_argument('--lr_pos_cross_attention_names', default=["pos_cross_attention"], type=str, nargs='+')
     parser.add_argument('--lr_pos_cross_attention', default=1e-3, type=float)
+    
+    parser.add_argument('--lr_mask_embed_names', default=["mask_embed"], type=str, nargs='+')
+    parser.add_argument('--lr_mask_embed', default=1e-3, type=float)
+    
     #################################################################################
     parser.add_argument('--batch_size', default=2, type=int)
     ##################################################################################
@@ -174,7 +182,7 @@ def get_args_parser():
                         help="Dropout applied in the transformer")
     parser.add_argument('--nheads', default=8, type=int,
                         help="Number of attention heads inside the transformer's attentions")
-    parser.add_argument('--num_queries', default=300, type=int,
+    parser.add_argument('--num_queries', default=100, type=int,
                         help="Number of query slots")
     parser.add_argument('--dec_n_points', default=4, type=int)
     parser.add_argument('--enc_n_points', default=4, type=int)
@@ -221,15 +229,16 @@ def get_args_parser():
     # * Loss coefficients
     ###########################################################################
     # () Adding masks loss coef
-    parser.add_argument('--mask_loss_coef', default=2, type=float)
+    parser.add_argument('--mask_loss_coef', default=5, type=float)
     parser.add_argument('--dice_loss_coef', default=3, type=float)
     parser.add_argument('--cost_giou_mask_to_box_coef', default=2, type=float)
     ###########################################################################
-    parser.add_argument('--cls_loss_coef', default=5, type=float)
+    parser.add_argument('--cls_loss_coef', default=3, type=float)
     parser.add_argument('--bbox_loss_coef', default=5, type=float)
     parser.add_argument('--giou_loss_coef', default=2, type=float)
     # parser.add_argument('--focal_alpha', default=0.25, type=float)
     parser.add_argument('--focal_alpha', default=1.25, type=float)
+    parser.add_argument('--ae_loss_coef', default=2, type=float)
 
     # dataset parameters
     parser.add_argument('--dataset_file', default='coco')
@@ -318,13 +327,7 @@ def get_args_parser():
 
 
 def main(args):
-    ############################################################################
-    # () Logging
-    log_dir = os.path.join(args.log_path, 'logs/logs_loss')
-    # if not os.path.exists(log_dir):
-    #     os.mkdir(log_dir)
-    writer = SummaryWriter(log_dir=log_dir)
-    ############################################################################
+    # writer = SummaryWriter(log_dir="/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR_mask_DN_DAB/outputs/logs_norm/logs_loss")
     
     utils.init_distributed_mode(args)
     print("git:\n  {}\n".format(utils.get_sha()))
@@ -335,167 +338,106 @@ def main(args):
 
     device = torch.device(args.device)
 
-    # fix the seed for reproducibility
-    seed = args.seed + utils.get_rank()
-    torch.manual_seed(seed)
-    np.random.seed(seed)
-    random.seed(seed)
+    # # fix the seed for reproducibility
+    # seed = args.seed + utils.get_rank()
+    # torch.manual_seed(seed)
+    # np.random.seed(seed)
+    # random.seed(seed)
 
-    model, criterion, postprocessors = build_model(args)
-    model.to(device)
-    output_dir = "/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR-mask-DN-DAB-Track-MOTS/outputs/model_two_stages.txt"
-    with open (output_dir, 'w') as f:
-        f.write (str(model))
+    # model, criterion, postprocessors = build_model(args)
+    # model.to(device)
+    # output_dir = "/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR-mask-DN-DAB-Track-MOTS/outputs/model_two_stages.txt"
+    # with open (output_dir, 'w') as f:
+    #     f.write (str(model))
 
-    model_without_ddp = model
+    # model_without_ddp = model
     
     # Freeze all parameters
-    for param in model_without_ddp.parameters():
-        param.requires_grad = True
+    # for param in model_without_ddp.parameters():
+    #     param.requires_grad = False
 
     # # Unfreeze segmentation head parameters
-    for param in model_without_ddp.PerPixelEmbedding.parameters():
-        param.requires_grad = False
+    # for param in model_without_ddp.PerPixelEmbedding.parameters():
+    #     param.requires_grad = True
+
+    # for param in model_without_ddp.AxialBlock.parameters():
+    #     param.requires_grad = True
         
-    for param in model_without_ddp.AxialBlock.parameters():
-        param.requires_grad = False
+    # for param in model_without_ddp.transformer.pos_cross_attention.parameters():
+    #     param.requires_grad = True
+        
+    # for param in model_without_ddp.transformer.parameters():
+    #     param.requires_grad = True
+        
+        
     
-    for param in model_without_ddp.transformer.pos_cross_attention.parameters():
-        param.requires_grad = False
-        
-    for param in model_without_ddp.transformer.mask_embed.parameters():
-        param.requires_grad = False
-        
-        
+    # n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    # print('number of params:', n_parameters)
+
+    # dataset_train = build_dataset(image_set='train', args=args)
+    # dataset_val = build_dataset(image_set='val', args=args)
+
+    # if args.distributed:
+    #     if args.cache_mode:
+    #         sampler_train = samplers.NodeDistributedSampler(dataset_train)
+    #         sampler_val = samplers.NodeDistributedSampler(dataset_val, shuffle=False)
+    #     else:
+    #         sampler_train = samplers.DistributedSampler(dataset_train)
+    #         sampler_val = samplers.DistributedSampler(dataset_val, shuffle=False)
+    # else:
+    #     sampler_train = torch.utils.data.RandomSampler(dataset_train)
+    #     sampler_val = torch.utils.data.SequentialSampler(dataset_val)
+
+    # batch_sampler_train = torch.utils.data.BatchSampler(
+    #     sampler_train, args.batch_size, drop_last=True)
+    # if args.dataset_file in ['e2e_mot', 'e2e_dance', 'mot', 'ori_mot', 'e2e_static_mot', 'e2e_joint']:
+    #     collate_fn = utils.mot_collate_fn
+    # else:
+    #     collate_fn = utils.collate_fn
+    # data_loader_train = DataLoader(dataset_train, batch_sampler=batch_sampler_train,
+    #                                collate_fn=collate_fn, num_workers=args.num_workers,
+    #                                pin_memory=True)
+    # data_loader_val = DataLoader(dataset_val, args.batch_size, sampler=sampler_val,
+    #                              drop_last=False, collate_fn=collate_fn, num_workers=args.num_workers,
+    #                              pin_memory=True)
+
+    # def match_name_keywords(n, name_keywords):
+    #     out = False
+    #     for b in name_keywords:
+    #         if b in n:
+    #             out = True
+    #             break
+    #     return out
     
-    n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print('number of params:', n_parameters)
-
-    dataset_train = build_dataset(image_set='train', args=args)
-    dataset_val = build_dataset(image_set='val', args=args)
-
-    if args.distributed:
-        if args.cache_mode:
-            sampler_train = samplers.NodeDistributedSampler(dataset_train)
-            sampler_val = samplers.NodeDistributedSampler(dataset_val, shuffle=False)
-        else:
-            sampler_train = samplers.DistributedSampler(dataset_train)
-            sampler_val = samplers.DistributedSampler(dataset_val, shuffle=False)
-    else:
-        sampler_train = torch.utils.data.RandomSampler(dataset_train)
-        sampler_val = torch.utils.data.SequentialSampler(dataset_val)
-
-    batch_sampler_train = torch.utils.data.BatchSampler(
-        sampler_train, args.batch_size, drop_last=True)
-    if args.dataset_file in ['e2e_mot', 'e2e_dance', 'mot', 'ori_mot', 'e2e_static_mot', 'e2e_joint']:
-        collate_fn = utils.mot_collate_fn
-    else:
-        collate_fn = utils.collate_fn
-    data_loader_train = DataLoader(dataset_train, batch_sampler=batch_sampler_train,
-                                   collate_fn=collate_fn, num_workers=args.num_workers,
-                                   pin_memory=True)
-    data_loader_val = DataLoader(dataset_val, args.batch_size, sampler=sampler_val,
-                                 drop_last=False, collate_fn=collate_fn, num_workers=args.num_workers,
-                                 pin_memory=True)
-
-    def match_name_keywords(n, name_keywords):
-        out = False
-        for b in name_keywords:
-            if b in n:
-                out = True
-                break
-        return out
-    
-    ##################################################################################
-    # () Param_dict to train the whole model
-    param_dicts = [
-        {
-            "params":
-                [p for n, p in model_without_ddp.named_parameters()
-                 if not match_name_keywords(n, args.lr_backbone_names) 
-                 and not match_name_keywords(n, args.lr_linear_proj_names) 
-                 #############################################################
-                 # () Adding different learning rate for the segmentation head
-                 and not match_name_keywords(n, args.lr_PerPixelEmbedding_names)
-                #  and not match_name_keywords(n, args.lr_seg_branches_names)
-                 and not match_name_keywords(n, args.lr_AxialBlock_names)
-                #  and not match_name_keywords(n, args.lr_pos_cross_attention_names)
-                #  and not match_name_keywords(n, args.lr_FPNEncoder_names)
-                 #############################################################
-                 and p.requires_grad],
-            "lr": args.lr,
-            # "weight_decay": args.main_weight_decay,
-        },
-        {
-            "params": [p for n, p in model_without_ddp.named_parameters() 
-                       if match_name_keywords(n, args.lr_backbone_names) and p.requires_grad],
-            "lr": args.lr_backbone,
-            # "weight_decay": args.backbone_weight_decay,
-        },
-        {
-            "params": [p for n, p in model_without_ddp.named_parameters() 
-                       if match_name_keywords(n, args.lr_linear_proj_names) and p.requires_grad],
-            "lr": args.lr * args.lr_linear_proj_mult,
-            # "weight_decay": args.linear_proj_mult_weight_decay,
-        },
-        #############################################################################################
-        # () Adding new learning rate for the segmentation head
-        
-        {
-            "params": [
-                p for n, p in model_without_ddp.named_parameters()
-                if match_name_keywords(n, args.lr_PerPixelEmbedding_names) and p.requires_grad
-            ],
-            "lr": args.lr_PerPixelEmbedding,
-            # "weight_decay": args.mask_head_weight_decay, 
-        },
-
-        # {
-        #     "params": [
-        #         p for n, p in model_without_ddp.named_parameters()
-        #         if match_name_keywords(n, args.lr_seg_branches_names) and p.requires_grad
-        #     ],
-        #     "lr": args.lr_seg_branches,
-        #     # "weight_decay": args.mask_head_weight_decay, 
-        # },
-
-        {
-            "params": [
-                p for n, p in model_without_ddp.named_parameters()
-                if match_name_keywords(n, args.lr_AxialBlock_names) and p.requires_grad
-            ],
-            "lr": args.lr_AxialBlock,
-            # "weight_decay": args.mask_head_weight_decay, 
-        },
-        
-        
-        # {
-        #     "params": [
-        #         p for n, p in model_without_ddp.named_parameters()
-        #         if match_name_keywords(n, args.lr_pos_cross_attention_names) and p.requires_grad
-        #     ],
-        #     "lr": args.lr_pos_cross_attention,
-        #     # "weight_decay": args.mask_head_weight_decay, 
-        # },
-        
-        # {
-        #     "params": [
-        #         p for n, p in model_without_ddp.named_parameters()
-        #         if match_name_keywords(n, args.lr_FPNEncoder_names) and p.requires_grad
-        #     ],
-        #     "lr": args.lr_FPNEncoder,
-        #     # "weight_decay": args.mask_head_weight_decay, 
-        # },
-
-        
-        
-    ]
-    #################################################################################
-    
-    
-    ##################################################################################
-    # () Only train the seg_head
     # param_dicts = [
+    #     {
+    #         "params":
+    #             [p for n, p in model_without_ddp.named_parameters()
+    #              if not match_name_keywords(n, args.lr_backbone_names) 
+    #              and not match_name_keywords(n, args.lr_linear_proj_names) 
+                
+    #              and not match_name_keywords(n, args.lr_PerPixelEmbedding_names)
+    #              and not match_name_keywords(n, args.lr_AxialBlock_names)
+    #              and not match_name_keywords(n, args.lr_pos_cross_attention_names)
+    #              and not match_name_keywords(n, args.lr_mask_embed_names)
+                
+    #              and p.requires_grad],
+    #         "lr": args.lr,
+    #         # "weight_decay": args.main_weight_decay,
+    #     },
+    #     {
+    #         "params": [p for n, p in model_without_ddp.named_parameters() 
+    #                    if match_name_keywords(n, args.lr_backbone_names) and p.requires_grad],
+    #         "lr": args.lr_backbone,
+    #         # "weight_decay": args.backbone_weight_decay,
+    #     },
+    #     {
+    #         "params": [p for n, p in model_without_ddp.named_parameters() 
+    #                    if match_name_keywords(n, args.lr_linear_proj_names) and p.requires_grad],
+    #         "lr": args.lr * args.lr_linear_proj_mult,
+    #         # "weight_decay": args.linear_proj_mult_weight_decay,
+    #     },
+       
     #     {
     #         "params": [
     #             p for n, p in model_without_ddp.named_parameters()
@@ -505,14 +447,6 @@ def main(args):
     #         # "weight_decay": args.mask_head_weight_decay, 
     #     },
 
-    #     {
-    #         "params": [
-    #             p for n, p in model_without_ddp.named_parameters()
-    #             if match_name_keywords(n, args.lr_seg_branches_names) and p.requires_grad
-    #         ],
-    #         "lr": args.lr_seg_branches,
-    #         # "weight_decay": args.mask_head_weight_decay, 
-    #     },
 
     #     {
     #         "params": [
@@ -526,7 +460,7 @@ def main(args):
         
     #     {
     #         "params": [
-    #             p for n, p in model_without_ddp.named_parameters()
+    #             p for n, p in model_without_ddp.transformer.named_parameters()
     #             if match_name_keywords(n, args.lr_pos_cross_attention_names) and p.requires_grad
     #         ],
     #         "lr": args.lr_pos_cross_attention,
@@ -535,196 +469,382 @@ def main(args):
         
     #     {
     #         "params": [
-    #             p for n, p in model_without_ddp.named_parameters()
-    #             if match_name_keywords(n, args.lr_FPNEncoder_names) and p.requires_grad
+    #             p for n, p in model_without_ddp.transformer.named_parameters()
+    #             if match_name_keywords(n, args.lr_mask_embed_names) and p.requires_grad
     #         ],
-    #         "lr": args.lr_FPNEncoder,
+    #         "lr": args.lr_mask_embed,
     #         # "weight_decay": args.mask_head_weight_decay, 
     #     },
+        
+
+        
     # ]
-    # ##################################################################################
-    
-    
-    if args.sgd:
-        optimizer = torch.optim.SGD(param_dicts, lr=args.lr, momentum=0.9,
-                                    weight_decay=args.weight_decay)
-    else:
-        optimizer = torch.optim.AdamW(param_dicts, lr=args.lr,
-                                      weight_decay=args.weight_decay)
     
     # if args.sgd:
-    #     optimizer = torch.optim.SGD(param_dicts,  momentum=0.9,)
+    #     optimizer = torch.optim.SGD(param_dicts, lr=args.lr, momentum=0.9,
+    #                                 weight_decay=args.weight_decay)
     # else:
-    #     optimizer = torch.optim.AdamW(param_dicts)
+    #     optimizer = torch.optim.AdamW(param_dicts, lr=args.lr,
+    #                                   weight_decay=args.weight_decay)
+    
+    # lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, args.lr_drop)
+   
+    # if args.distributed:
+    #     model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=True)
+    #     model_without_ddp = model.module
+
+    # if args.dataset_file == "coco_panoptic":
+    #     # We also evaluate AP during panoptic training, on original coco DS
+    #     coco_val = datasets.coco.build("val", args)
+    #     base_ds = get_coco_api_from_dataset(coco_val)
+    # else:
+    #     base_ds = get_coco_api_from_dataset(dataset_val)
+
+    # if args.frozen_weights is not None:
+    #     checkpoint = torch.load(args.frozen_weights, map_location='cpu')
+    #     model_without_ddp.detr.load_state_dict(checkpoint['model'])
+
+    # if args.pretrained is not None:
+    #     model_without_ddp = load_model(model_without_ddp, args.pretrained)
+    
+    # # if args.play:
+    # #     visualization(args, data_loader_train, "train")
         
-        
-        
-    ##########################################################################
-    # () Adopting the learning rate
-    # () Original one
-    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, args.lr_drop)
+    # output_dir = Path(args.output_dir)
+    # if args.resume:
+    #     if args.resume.startswith('https'):
+    #         checkpoint = torch.hub.load_state_dict_from_url(
+    #             args.resume, map_location='cpu', check_hash=True)
+    #     else:
+    #         checkpoint = torch.load(args.resume, map_location='cpu')
+    #     missing_keys, unexpected_keys = model_without_ddp.load_state_dict(checkpoint['model'], strict=False)
+    #     unexpected_keys = [k for k in unexpected_keys if not (k.endswith('total_params') or k.endswith('total_ops'))]
+    #     if len(missing_keys) > 0:
+    #         print('Missing Keys: {}'.format(missing_keys))
+    #     if len(unexpected_keys) > 0:
+    #         print('Unexpected Keys: {}'.format(unexpected_keys))
+    #     if not args.eval and 'optimizer' in checkpoint and 'lr_scheduler' in checkpoint and 'epoch' in checkpoint:
+    #         import copy
+    #         p_groups = copy.deepcopy(optimizer.param_groups)
+    #         optimizer.load_state_dict(checkpoint['optimizer'])
+    #         for pg, pg_old in zip(optimizer.param_groups, p_groups):
+    #             pg['lr'] = pg_old['lr']
+    #             pg['initial_lr'] = pg_old['initial_lr']
+    #         # print(optimizer.param_groups)
+    #         lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
+    #         # todo: this is a hack for doing experiment that resume from checkpoint and also modify lr scheduler (e.g., decrease lr in advance).
+    #         args.override_resumed_lr_drop = True
+    #         if args.override_resumed_lr_drop:
+    #             print('Warning: (hack) args.override_resumed_lr_drop is set to True, so args.lr_drop would override lr_drop in resumed lr_scheduler.')
+    #             lr_scheduler.step_size = args.lr_drop
+    #             lr_scheduler.base_lrs = list(map(lambda group: group['initial_lr'], optimizer.param_groups))
+    #         lr_scheduler.step(lr_scheduler.last_epoch)
+    #         args.start_epoch = checkpoint['epoch'] + 1
     
-    # warmup_epochs = 10
-    # initial_lr = 2e-6  # Starting LR for warm-up
-    # target_lr = 2e-4   # LR after warm-up
-    # step_size = args.lr_drop
-    # gamma = 0.5  # Decay factor for StepLR
-    
-
-    # # Initialize your optimizer with the initial learning rate
-    # for param_group in optimizer.param_groups:
-    #     param_group['lr'] = initial_lr
-
-    # # Initialize the combined scheduler
-    # lr_scheduler = WarmupThenStepLR(optimizer, warmup_epochs, target_lr, step_size, gamma)
-    ##########################################################################
+    # if args.eval:
+    #     test_stats, coco_evaluator = evaluate(model, criterion, postprocessors,
+    #                                           data_loader_val, base_ds, device, args.output_dir)
+    #     if args.output_dir:
+    #         utils.save_on_master(coco_evaluator.coco_eval["bbox"].eval, output_dir / "eval.pth")
+    #     return
     
     
-
-
-    if args.distributed:
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=True)
-        model_without_ddp = model.module
-
-    if args.dataset_file == "coco_panoptic":
-        # We also evaluate AP during panoptic training, on original coco DS
-        coco_val = datasets.coco.build("val", args)
-        base_ds = get_coco_api_from_dataset(coco_val)
+    # K-Fold Cross Validation
+    dataset_train = build_dataset(image_set='train', args=args)
+    dataset_val = build_dataset(image_set='val', args=args)
+    
+    if args.dataset_file in ['e2e_mot', 'e2e_dance', 'mot', 'ori_mot', 'e2e_static_mot', 'e2e_joint']:
+        collate_fn = utils.mot_collate_fn
     else:
-        base_ds = get_coco_api_from_dataset(dataset_val)
+        collate_fn = utils.collate_fn
+    
+    def match_name_keywords(n, name_keywords):
+        out = False
+        for b in name_keywords:
+            if b in n:
+                out = True
+                break
+        return out   
+    
+    # Setup KFold
+    # fix the seed for reproducibility
+    seed = args.seed + utils.get_rank()
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+            
+    kf = KFold(n_splits=10, shuffle=True, random_state=seed)
 
-    if args.frozen_weights is not None:
-        checkpoint = torch.load(args.frozen_weights, map_location='cpu')
-        model_without_ddp.detr.load_state_dict(checkpoint['model'])
 
-    if args.pretrained is not None:
-        model_without_ddp = load_model(model_without_ddp, args.pretrained)
-    
-    # if args.play:
-    #     visualization(args, data_loader_train, "train")
-        
-    output_dir = Path(args.output_dir)
-    if args.resume:
-        if args.resume.startswith('https'):
-            checkpoint = torch.hub.load_state_dict_from_url(
-                args.resume, map_location='cpu', check_hash=True)
-        else:
-            checkpoint = torch.load(args.resume, map_location='cpu')
-        missing_keys, unexpected_keys = model_without_ddp.load_state_dict(checkpoint['model'], strict=False)
-        unexpected_keys = [k for k in unexpected_keys if not (k.endswith('total_params') or k.endswith('total_ops'))]
-        if len(missing_keys) > 0:
-            print('Missing Keys: {}'.format(missing_keys))
-        if len(unexpected_keys) > 0:
-            print('Unexpected Keys: {}'.format(unexpected_keys))
-        if not args.eval and 'optimizer' in checkpoint and 'lr_scheduler' in checkpoint and 'epoch' in checkpoint:
-            import copy
-            p_groups = copy.deepcopy(optimizer.param_groups)
-            optimizer.load_state_dict(checkpoint['optimizer'])
-            for pg, pg_old in zip(optimizer.param_groups, p_groups):
-                pg['lr'] = pg_old['lr']
-                pg['initial_lr'] = pg_old['initial_lr']
-            # print(optimizer.param_groups)
-            lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
-            # todo: this is a hack for doing experiment that resume from checkpoint and also modify lr scheduler (e.g., decrease lr in advance).
-            args.override_resumed_lr_drop = True
-            if args.override_resumed_lr_drop:
-                print('Warning: (hack) args.override_resumed_lr_drop is set to True, so args.lr_drop would override lr_drop in resumed lr_scheduler.')
-                lr_scheduler.step_size = args.lr_drop
-                lr_scheduler.base_lrs = list(map(lambda group: group['initial_lr'], optimizer.param_groups))
-            lr_scheduler.step(lr_scheduler.last_epoch)
-            args.start_epoch = checkpoint['epoch'] + 1
-    
-    if args.eval:
-        test_stats, coco_evaluator = evaluate(model, criterion, postprocessors,
-                                              data_loader_val, base_ds, device, args.output_dir)
-        if args.output_dir:
-            utils.save_on_master(coco_evaluator.coco_eval["bbox"].eval, output_dir / "eval.pth")
-        return
-    
     print("Start training")
     start_time = time.time()
 
     train_func = train_one_epoch
     if args.dataset_file in ['e2e_mot', 'e2e_dance', 'mot', 'ori_mot', 'e2e_static_mot', 'e2e_joint']:
         train_func = train_one_epoch_mot
-        dataset_train.set_epoch(args.start_epoch)
-        dataset_val.set_epoch(args.start_epoch)
-    for epoch in range(args.start_epoch, args.epochs):
-        if args.distributed:
-            sampler_train.set_epoch(epoch)
-        train_stats = train_func(
-            model, criterion, data_loader_train, optimizer, device, epoch, args.clip_max_norm)
         
-        ####################################################################################################
-        # () Logging
-        for key, value in train_stats.items():
-            writer.add_scalar(f'Training/{key}', value, epoch)
-        ####################################################################################################
-        
-        lr_scheduler.step()
-        if args.output_dir:
-            checkpoint_paths = [output_dir / 'checkpoint.pth']
-            # extra checkpoint before LR drop and every 5 epochs
-            if (epoch + 1) % args.lr_drop == 0 or (epoch + 1) % args.save_period == 0 or (((args.epochs >= 100 and (epoch + 1) > 100) or args.epochs < 100) and (epoch + 1) % 5 == 0):
-                checkpoint_paths.append(output_dir / f'checkpoint{epoch:04}.pth')
-            for checkpoint_path in checkpoint_paths:
-                utils.save_on_master({
-                    'model': model_without_ddp.state_dict(),
-                    'optimizer': optimizer.state_dict(),
-                    'lr_scheduler': lr_scheduler.state_dict(),
-                    'epoch': epoch,
-                    'args': args,
-                }, checkpoint_path)
-        
-        if args.dataset_file not in ['e2e_mot', 'e2e_dance', 'mot', 'ori_mot', 'e2e_static_mot', 'e2e_joint']:
-            test_stats, coco_evaluator = evaluate(
-                model, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir
-            )
-            #############################################################
-            # Log validation metrics
-            for key, value in test_stats.items():
-               writer.add_scalar(f'Validation/{key}', value, epoch)
-            #############################################################
-
+        # Cross-validation loop
+        fold = 0
+        for fold, (train_index, val_index) in enumerate(kf.split(np.arange(len(dataset_train)))):
+            print(f"Training on fold {fold+1}")
+            
+            writer = SummaryWriter(log_dir=f"/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR_mask_DN_DAB/outputs/logs_AE/logs_loss/fold_{fold+1}")
     
+            # Model initialization
+            model, criterion, postprocessors = build_model(args)
+            model.to(device)
+            model_without_ddp = model
+            
+            output_dir = "/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR_mask_DN_DAB/outputs/model_two_stages.txt"
+            with open (output_dir, 'w') as f:
+                f.write (str(model))
+    
+            n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
+            print('number of params:', n_parameters)
+    
+    
+            # Subset train and validation datasets
+            # dataset_train_fold = torch.utils.data.Subset(dataset_train, train_index)
+            # dataset_val_fold = torch.utils.data.Subset(dataset_train, val_index)
+            dataset_train_fold = CustomSubset(dataset_train, train_index)
+            dataset_val_fold = CustomSubset(dataset_train, val_index)
+            
+            
+            if args.distributed:
+                if args.cache_mode:
+                    sampler_train = samplers.NodeDistributedSampler(dataset_train_fold)
+                    sampler_val = samplers.NodeDistributedSampler(dataset_val_fold, shuffle=False)
+                else:
+                    sampler_train = samplers.DistributedSampler(dataset_train_fold)
+                    sampler_val = samplers.DistributedSampler(dataset_val_fold, shuffle=False)
+            else:
+                sampler_train = torch.utils.data.RandomSampler(dataset_train_fold)
+                sampler_val = torch.utils.data.SequentialSampler(dataset_val_fold)
+
+            batch_sampler_train = torch.utils.data.BatchSampler(
+                sampler_train, args.batch_size, drop_last=True)
+        
+            
+            data_loader_train = DataLoader(dataset_train_fold, batch_sampler=batch_sampler_train,
+                                   collate_fn=collate_fn, num_workers=args.num_workers,
+                                   pin_memory=True)
+            data_loader_val = DataLoader(dataset_val_fold, args.batch_size, sampler=sampler_val,
+                                        drop_last=False, collate_fn=collate_fn, num_workers=args.num_workers,
+                                        pin_memory=True)
+    
+            # Defining optimizer inside the loop
+            param_dicts = [
+                {
+                    "params":
+                        [p for n, p in model_without_ddp.named_parameters()
+                        if not match_name_keywords(n, args.lr_backbone_names) 
+                        and not match_name_keywords(n, args.lr_linear_proj_names) 
+                        and not match_name_keywords(n, args.lr_PerPixelEmbedding_names)
+                        and not match_name_keywords(n, args.lr_AxialBlock_names)
+                        and not match_name_keywords(n, args.lr_pos_cross_attention_names)
+                        and not match_name_keywords(n, args.lr_mask_embed_names)
+                        and p.requires_grad],
+                    "lr": args.lr,
+                    # "weight_decay": args.main_weight_decay,
+                },
+                {
+                    "params": [p for n, p in model_without_ddp.named_parameters() 
+                            if match_name_keywords(n, args.lr_backbone_names) and p.requires_grad],
+                    "lr": args.lr_backbone,
+                    # "weight_decay": args.backbone_weight_decay,
+                },
+                {
+                    "params": [p for n, p in model_without_ddp.named_parameters() 
+                            if match_name_keywords(n, args.lr_linear_proj_names) and p.requires_grad],
+                    "lr": args.lr * args.lr_linear_proj_mult,
+                    # "weight_decay": args.linear_proj_mult_weight_decay,
+                },
+            
+                {
+                    "params": [
+                        p for n, p in model_without_ddp.named_parameters()
+                        if match_name_keywords(n, args.lr_PerPixelEmbedding_names) and p.requires_grad
+                    ],
+                    "lr": args.lr_PerPixelEmbedding,
+                    # "weight_decay": args.mask_head_weight_decay, 
+                },
 
 
-            log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
-                         **{f'test_{k}': v for k, v in test_stats.items()},
-                         'epoch': epoch,
-                         'n_parameters': n_parameters}
+                {
+                    "params": [
+                        p for n, p in model_without_ddp.named_parameters()
+                        if match_name_keywords(n, args.lr_AxialBlock_names) and p.requires_grad
+                    ],
+                    "lr": args.lr_AxialBlock,
+                    # "weight_decay": args.mask_head_weight_decay, 
+                },
+                
+                
+                {
+                    "params": [
+                        p for n, p in model_without_ddp.transformer.named_parameters()
+                        if match_name_keywords(n, args.lr_pos_cross_attention_names) and p.requires_grad
+                    ],
+                    "lr": args.lr_pos_cross_attention,
+                    # "weight_decay": args.mask_head_weight_decay, 
+                },
+                
+                {
+                    "params": [
+                        p for n, p in model_without_ddp.transformer.named_parameters()
+                        if match_name_keywords(n, args.lr_mask_embed_names) and p.requires_grad
+                    ],
+                    "lr": args.lr_mask_embed,
+                    # "weight_decay": args.mask_head_weight_decay, 
+                },   
+            ]
+            
+            if args.sgd:
+                optimizer = torch.optim.SGD(param_dicts, lr=args.lr, momentum=0.9,
+                                            weight_decay=args.weight_decay)
+            else:
+                optimizer = torch.optim.AdamW(param_dicts, lr=args.lr,
+                                            weight_decay=args.weight_decay)
+            
+            lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, args.lr_drop)
+        
+            if args.distributed:
+                model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=True)
+                model_without_ddp = model.module
 
-            if args.output_dir and utils.is_main_process():
-                with (output_dir / "log.txt").open("a") as f:
-                    f.write(json.dumps(log_stats) + "\n")
+            if args.dataset_file == "coco_panoptic":
+                # We also evaluate AP during panoptic training, on original coco DS
+                coco_val = datasets.coco.build("val", args)
+                base_ds = get_coco_api_from_dataset(coco_val)
+            else:
+                base_ds = get_coco_api_from_dataset(dataset_val)
 
-                # for evaluation logs
-                if coco_evaluator is not None:
-                    (output_dir / 'eval').mkdir(exist_ok=True)
-                    if "bbox" in coco_evaluator.coco_eval:
-                        filenames = ['latest.pth']
-                        if epoch % 50 == 0:
-                            filenames.append(f'{epoch:03}.pth')
-                        for name in filenames:
-                            torch.save(coco_evaluator.coco_eval["bbox"].eval,
-                                       output_dir / "eval" / name)
+            if args.frozen_weights is not None:
+                checkpoint = torch.load(args.frozen_weights, map_location='cpu')
+                model_without_ddp.detr.load_state_dict(checkpoint['model'])
+
+            if args.pretrained is not None:
+                model_without_ddp = load_model(model_without_ddp, args.pretrained)
             
+            output_dir = Path(args.output_dir)
             
-        if args.dataset_file in ['e2e_mot', 'e2e_dance', 'mot', 'ori_mot', 'e2e_static_mot', 'e2e_joint']:
-            dataset_train.step_epoch()
-            dataset_val.step_epoch()
+            if args.resume:
+                if args.resume.startswith('https'):
+                    checkpoint = torch.hub.load_state_dict_from_url(
+                        args.resume, map_location='cpu', check_hash=True)
+                else:
+                    checkpoint = torch.load(args.resume, map_location='cpu')
+                missing_keys, unexpected_keys = model_without_ddp.load_state_dict(checkpoint['model'], strict=False)
+                unexpected_keys = [k for k in unexpected_keys if not (k.endswith('total_params') or k.endswith('total_ops'))]
+                if len(missing_keys) > 0:
+                    print('Missing Keys: {}'.format(missing_keys))
+                if len(unexpected_keys) > 0:
+                    print('Unexpected Keys: {}'.format(unexpected_keys))
+                if not args.eval and 'optimizer' in checkpoint and 'lr_scheduler' in checkpoint and 'epoch' in checkpoint:
+                    import copy
+                    p_groups = copy.deepcopy(optimizer.param_groups)
+                    optimizer.load_state_dict(checkpoint['optimizer'])
+                    for pg, pg_old in zip(optimizer.param_groups, p_groups):
+                        pg['lr'] = pg_old['lr']
+                        pg['initial_lr'] = pg_old['initial_lr']
+                    # print(optimizer.param_groups)
+                    lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
+                    # todo: this is a hack for doing experiment that resume from checkpoint and also modify lr scheduler (e.g., decrease lr in advance).
+                    args.override_resumed_lr_drop = True
+                    if args.override_resumed_lr_drop:
+                        print('Warning: (hack) args.override_resumed_lr_drop is set to True, so args.lr_drop would override lr_drop in resumed lr_scheduler.')
+                        lr_scheduler.step_size = args.lr_drop
+                        lr_scheduler.base_lrs = list(map(lambda group: group['initial_lr'], optimizer.param_groups))
+                    lr_scheduler.step(lr_scheduler.last_epoch)
+                    args.start_epoch = checkpoint['epoch'] + 1
             
+            if args.eval:
+                test_stats, coco_evaluator = evaluate(model, criterion, postprocessors,
+                                                    data_loader_val, base_ds, device, args.output_dir)
+                if args.output_dir:
+                    utils.save_on_master(coco_evaluator.coco_eval["bbox"].eval, output_dir / "eval.pth")
+                return
             
-        ####################################################################################################
-        # Log learning rate
-        for i, group in enumerate(optimizer.param_groups):
-            writer.add_scalar(f'Learning_Rate/group_{i}', group['lr'], epoch)
-        ####################################################################################################
+            dataset_train_fold.set_epoch(args.start_epoch)
+            dataset_val_fold.set_epoch(args.start_epoch)
+                
             
-        ############################################################   
-        writer.close()
-        ############################################################  
-            
+            # Start of training
+            for epoch in range(args.start_epoch, args.epochs):
+                if args.distributed:
+                    sampler_train.set_epoch(epoch)
+                train_stats = train_func(
+                    model, criterion, data_loader_train, optimizer, device, epoch, args.clip_max_norm)
+
+                # () Logging
+                for key, value in train_stats.items():
+                    # writer.add_scalar(f'Training/{key}', value, epoch)
+                    writer.add_scalar(f'Fold_{fold+1}/Training/{key}', value, epoch)
+                
+                lr_scheduler.step()
+                if args.output_dir:
+                    checkpoint_paths = [output_dir / 'checkpoint.pth']
+                    # extra checkpoint before LR drop and every 5 epochs
+                    if (epoch + 1) % args.lr_drop == 0 or (epoch + 1) % args.save_period == 0 or (((args.epochs >= 100 and (epoch + 1) > 100) or args.epochs < 100) and (epoch + 1) % 5 == 0):
+                        checkpoint_paths.append(output_dir / f'checkpoint{epoch:04}.pth')
+                    for checkpoint_path in checkpoint_paths:
+                        utils.save_on_master({
+                            'model': model_without_ddp.state_dict(),
+                            'optimizer': optimizer.state_dict(),
+                            'lr_scheduler': lr_scheduler.state_dict(),
+                            'epoch': epoch,
+                            'args': args,
+                        }, checkpoint_path)
+                
+                if args.dataset_file not in ['e2e_mot', 'e2e_dance', 'mot', 'ori_mot', 'e2e_static_mot', 'e2e_joint']:
+                    test_stats, coco_evaluator = evaluate(
+                        model, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir
+                    )
+
+                    # Log validation metrics
+                    for key, value in test_stats.items():
+                        # writer.add_scalar(f'Validation/{key}', value, epoch)
+                        writer.add_scalar(f'Fold_{fold+1}/Validation/{key}', value, epoch)
+
+
+                    log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
+                                **{f'test_{k}': v for k, v in test_stats.items()},
+                                'epoch': epoch,
+                                'n_parameters': n_parameters}
+
+                    if args.output_dir and utils.is_main_process():
+                        with (output_dir / "log.txt").open("a") as f:
+                            f.write(json.dumps(log_stats) + "\n")
+
+                        # for evaluation logs
+                        if coco_evaluator is not None:
+                            (output_dir / 'eval').mkdir(exist_ok=True)
+                            if "bbox" in coco_evaluator.coco_eval:
+                                filenames = ['latest.pth']
+                                if epoch % 50 == 0:
+                                    filenames.append(f'{epoch:03}.pth')
+                                for name in filenames:
+                                    torch.save(coco_evaluator.coco_eval["bbox"].eval,
+                                            output_dir / "eval" / name)
+                    
+                    
+                if args.dataset_file in ['e2e_mot', 'e2e_dance', 'mot', 'ori_mot', 'e2e_static_mot', 'e2e_joint']:
+                    dataset_train.step_epoch()
+                    dataset_val.step_epoch()
+
+                # Log learning rate
+                for i, group in enumerate(optimizer.param_groups):
+                    # writer.add_scalar(f'Learning_Rate/group_{i}', group['lr'], epoch)
+                    writer.add_scalar(f'Fold_{fold+1}/Learning_Rate/group_{i}', group['lr'], epoch)
+
+                  
+                writer.close()
+                # pass
+                
+            # Reset model and optimizer for next fold
+            del model, optimizer, lr_scheduler
+            torch.cuda.empty_cache()
+               
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print('Training time {}'.format(total_time_str))

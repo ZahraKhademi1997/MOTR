@@ -127,17 +127,21 @@ class HungarianMatcher(nn.Module):
     
 
         with torch.no_grad():
-            bs, num_queries = outputs["pred_logits"].shape[:2]
+            if "pred_logits" in outputs:
+                bs, num_queries = outputs["pred_logits"].shape[:2]
+            else:
+                bs, num_queries = outputs["pred_boxes"].shape[:2]
+                # assert not num_queries !=100, f"Error: num_queries should not be 100, but got {num_queries}"
 
             # We flatten to compute the cost matrices in a batch
-            if use_focal:
-                out_prob = outputs["pred_logits"].flatten(0, 1).sigmoid()
-            else:
-                out_prob = outputs["pred_logits"].flatten(0, 1).softmax(-1)  # [batch_size * num_queries, num_classes]
+            if "pred_logits" in outputs:
+                if use_focal:
+                    out_prob = outputs["pred_logits"].flatten(0, 1).sigmoid()
+                else:
+                    out_prob = outputs["pred_logits"].flatten(0, 1).softmax(-1)  # [batch_size * num_queries, num_classes]
             out_bbox = outputs["pred_boxes"].flatten(0, 1)  # [batch_size * num_queries, 4]
 
             # Also concat the target labels and boxes
-            # print("targets[0] in matcher is:", targets)
             if isinstance(targets[0], Instances):
                 tgt_ids = torch.cat([gt_per_img.labels for gt_per_img in targets])
                 tgt_bbox = torch.cat([gt_per_img.boxes for gt_per_img in targets])
@@ -146,25 +150,24 @@ class HungarianMatcher(nn.Module):
                 tgt_bbox = torch.cat([v["boxes"] for v in targets])
 
             # Compute the classification cost.
-            if use_focal:
-                alpha = 0.25
-                gamma = 2.0
-                neg_cost_class = (1 - alpha) * (out_prob ** gamma) * (-(1 - out_prob + 1e-8).log())
-                pos_cost_class = alpha * ((1 - out_prob) ** gamma) * (-(out_prob + 1e-8).log())
-                cost_class = pos_cost_class[:, tgt_ids] - neg_cost_class[:, tgt_ids]
-                
-            else:
-                # Compute the classification cost. Contrary to the loss, we don't use the NLL,
-                # but approximate it in 1 - proba[target class].
-                # The 1 is a constant that doesn't change the matching, it can be ommitted.
-                cost_class = -out_prob[:, tgt_ids]
+            if "pred_logits" in outputs:
+                if use_focal:
+                    alpha = 0.25
+                    gamma = 2.0
+                    neg_cost_class = (1 - alpha) * (out_prob ** gamma) * (-(1 - out_prob + 1e-8).log())
+                    pos_cost_class = alpha * ((1 - out_prob) ** gamma) * (-(out_prob + 1e-8).log())
+                    cost_class = pos_cost_class[:, tgt_ids] - neg_cost_class[:, tgt_ids]
+                    
+                else:
+                    # Compute the classification cost. Contrary to the loss, we don't use the NLL,
+                    # but approximate it in 1 - proba[target class].
+                    # The 1 is a constant that doesn't change the matching, it can be ommitted.
+                    cost_class = -out_prob[:, tgt_ids]
 
             # Compute the L1 cost between boxes
             cost_bbox = torch.cdist(out_bbox, tgt_bbox, p=1)
 
-
             # Compute the giou cost betwen boxes
-            # print('out_bbox:', out_bbox)
             cost_giou = -generalized_box_iou(box_cxcywh_to_xyxy(out_bbox),
                                              box_cxcywh_to_xyxy(tgt_bbox))
             
@@ -226,18 +229,18 @@ class HungarianMatcher(nn.Module):
                     print("Mismatch in the size of cost tensors: b/g") #Causes the problem
                 
                 C = (self.cost_bbox * cost_bbox.to(tgt_mask.device) + self.cost_class * cost_class.to(tgt_mask.device) + self.cost_giou * cost_giou.to(tgt_mask.device) + self.cost_dice * cost_dice.to(tgt_mask.device) + self.cost_mask * cost_mask.to(tgt_mask.device))
-                C = C.view(bs, num_queries, -1).cpu()
-            else: 
-                # print("out_bbox.device:", tgt_mask.device)
-                if cost_bbox.shape[0] != cost_class.shape[0]:
-                    print("Mismatch in the size of cost tensors")
-
-                C = (self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou)
-                C = C.view(bs, num_queries, -1).cpu()
-            
-            # C = (self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou)
-            # C = C.view(bs, num_queries, -1).cpu()
+                # C = C.view(bs, num_queries, -1).cpu()
                 
+            if "pred_logits" in outputs:
+                C = (self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou)
+                # C = C.view(bs, num_queries, -1).cpu()
+                
+            elif "pred_logits" not in outputs:
+                C = (self.cost_bbox * cost_bbox + self.cost_giou * cost_giou)
+                # C = C.view(bs, num_queries, -1).cpu()
+            
+            
+            C = C.view(bs, num_queries, -1).cpu()   
             if isinstance(targets[0], Instances):
                 sizes = [len(gt_per_img.boxes) for gt_per_img in targets]
             else:
@@ -252,7 +255,6 @@ def build_matcher(args):
         return HungarianMatcher(cost_class=args.set_cost_class,
                             cost_bbox=args.set_cost_bbox,
                             cost_giou=args.set_cost_giou,
-                            # cost_mask_dice = args.set_cost_mask_dice,
                             cost_mask = args.set_cost_mask,
                             cost_dice = args.set_cost_dice
                             )

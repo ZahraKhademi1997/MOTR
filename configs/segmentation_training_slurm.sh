@@ -15,7 +15,7 @@
 #SBATCH --error=R-%x.%j.err
 #SBATCH --gpus-per-node=a100:8
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-gpu=8
+#SBATCH --cpus-per-gpu=6
 #SBATCH --mem-per-cpu=4gb
 #SBATCH --constraint=a100
 
@@ -51,6 +51,8 @@ echo "---------------------------"
 # python -u main.py
 # python -u models/ops/setup.py build install
 export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128
+export CUDA_LAUNCH_BLOCKING=1
+export TORCH_USE_CUDA_DSA=1
 
 # PYTHON SCRIPT
 #==============
@@ -67,8 +69,10 @@ python -m torch.distributed.launch --nproc_per_node=8 \
     --lr_backbone 2e-5 \
     --lr_PerPixelEmbedding 4e-4 \
     --lr_AxialBlock 2e-4 \
-    --pretrained /blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR_mask_DN_DAB/outputs/pretrained_weights/model_motr_final.pth \
-    --output_dir /blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR_mask_DN_DAB/outputs/model_checkpoints/ \
+    --lr_pos_cross_attention 2e-4 \
+    --lr_mask_embed 2e-4 \
+    --pretrained weights from pretrained segmentation head in the previous framework \
+    --output_dir /blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR_mask_DN_DAB/outputs/model_checkpoints_AE/ \
     --batch_size 1 \
     --sample_mode random_interval \
     --sample_interval 10 \
