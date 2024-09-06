@@ -452,18 +452,6 @@ class DeformableTransformer(nn.Module):
             
             outputs_class, outputs_mask = self.forward_prediction_heads(tgt_undetach.transpose(0, 1), srcs[0])
             tgt = tgt_undetach.detach() # preventing gradient flow from decoder to encoder --> lets put this as the track_instances.query_pos
-            
-            #####################################################################################################
-            # Concatenating embedded ref points as pos_query and tgt as content query to pass them to QIM
-            batch_size, num_queries, _ = reference_points.shape
-            reference_points_flat = reference_points.sigmoid().view(batch_size * num_queries, 4)
-            positional_query = self.reference_point_transform(reference_points_flat)
-            
-            cat_queries = torch.cat([tgt.squeeze(0), positional_query], dim=-1)
-            
-            self.init_det = nn.Parameter(cat_queries)
-            #####################################################################################################
-            
             reference_points = reference_points.detach()
             assert not torch.isnan(reference_points).any(), "NaN values detected in inter_ref 415."
             
@@ -496,7 +484,17 @@ class DeformableTransformer(nn.Module):
                 reference_points = box_xyxy_to_cxcywh(reference_points.sigmoid()) / torch.as_tensor([w, h, w, h],dtype=torch.float).to(src_flatten.device)                                                                        
                 reference_points = reference_points.reshape(outputs_mask.shape[0], outputs_mask.shape[1], 4)
                 reference_points = inverse_sigmoid(reference_points) # Serves as the positional query
-
+            
+            #####################################################################################################
+            # Concatenating embedded ref points as pos_query and tgt as content query to pass them to QIM
+            batch_size, num_queries, _ = reference_points.shape
+            reference_points_flat = reference_points.sigmoid().view(batch_size * num_queries, 4)
+            positional_query = self.reference_point_transform(reference_points_flat)
+            
+            cat_queries = torch.cat([tgt.squeeze(0), positional_query], dim=-1)
+            
+            self.init_det = nn.Parameter(cat_queries)
+            #####################################################################################################
                 
         else:
             tgt = self.query_feat.weight[None].repeat(bs, 1, 1)
