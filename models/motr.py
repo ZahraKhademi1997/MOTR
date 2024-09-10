@@ -58,7 +58,7 @@ class ClipMatcher(SetCriterion):
                         oversample_ratio,
                         importance_sample_ratio,
                         dn_losses=[],
-                        dn=True,
+                        dn=False,
                         ):
         """ Create the criterion.
         Parameters:
@@ -397,39 +397,49 @@ class ClipMatcher(SetCriterion):
     
     
     # Autoencoder Loss
-    def autoencoder_loss(self, reconstructed, gt_instances: List[Instances], indices: List[tuple], num_boxes):
-        """
-        Calculate the mean squared error loss between the original and reconstructed bounding boxes.
+    # def autoencoder_loss(self, reconstructed, gt_instances: List[Instances], indices: List[tuple], num_boxes):
+    #     """
+    #     Calculate the mean squared error loss between the original and reconstructed bounding boxes.
 
-        Parameters:
-            reconstructed (torch.Tensor): The reconstructed bounding boxes from the autoencoder, shape (batch_size, num_boxes, 4)
-            gt_instances (List[Instances]): The ground truth instances, which include bounding boxes.
-            indices (List[tuple]): The matching indices from Hungarian algorithm.
-            num_boxes (int): The total number of boxes.
+    #     Parameters:
+    #         reconstructed (torch.Tensor): The reconstructed bounding boxes from the autoencoder, shape (batch_size, num_boxes, 4)
+    #         gt_instances (List[Instances]): The ground truth instances, which include bounding boxes.
+    #         indices (List[tuple]): The matching indices from Hungarian algorithm.
+    #         num_boxes (int): The total number of boxes.
 
-        Returns:
-            torch.Tensor: The computed MSE loss.
-        """
-        # Iterate over the list of tuples containing prediction and GT indices
-        for (pred_indices, gt_indices) in indices:
-            # print(f"Prediction Indices: {pred_indices}")
-            # print(f"Ground Truth Indices: {gt_indices}")
+    #     Returns:
+    #         torch.Tensor: The computed MSE loss.
+    #     """
+    #     # Iterate over the list of tuples containing prediction and GT indices
+    #     for (pred_indices, gt_indices) in indices:
+    #         # print(f"Prediction Indices: {pred_indices}")
+    #         # print(f"Ground Truth Indices: {gt_indices}")
 
-            # Now you can use pred_indices and gt_indices to index into reconstructed and gt_instances
-            pred_boxes = reconstructed['reconstructed_ref_points'].sigmoid().squeeze(0)
-            pred_boxes = pred_boxes[pred_indices]  # Access the predicted boxes
-            # gt_boxes = torch.cat([gt_per_img.boxes[i] for gt_per_img, i in zip(gt_instances, gt_indices)], dim=0)  # Access GT boxes
-            gt_boxes = torch.cat([gt_per_img.boxes[i] for gt_per_img, (_, i) in zip(gt_instances, indices)], dim=0)
-            # print('pred_boxes:', pred_boxes.shape, 'gt_boxes:', gt_boxes.shape)
-            # Compute MSE loss between predicted and GT boxes (reduction='sum' over individual elements)
-            loss_ae = F.mse_loss(pred_boxes, gt_boxes, reduction='none')
+    #         # Now you can use pred_indices and gt_indices to index into reconstructed and gt_instances
+    #         pred_boxes = reconstructed['reconstructed_ref_points'].sigmoid().squeeze(0)
+    #         pred_boxes = pred_boxes[pred_indices]  # Access the predicted boxes
+    #         # gt_boxes = torch.cat([gt_per_img.boxes[i] for gt_per_img, i in zip(gt_instances, gt_indices)], dim=0)  # Access GT boxes
+    #         gt_boxes = torch.cat([gt_per_img.boxes[i] for gt_per_img, (_, i) in zip(gt_instances, indices)], dim=0)
+    #         # print('pred_boxes:', pred_boxes.shape, 'gt_boxes:', gt_boxes.shape)
+    #         # Compute MSE loss between predicted and GT boxes (reduction='sum' over individual elements)
+    #         loss_ae = F.mse_loss(pred_boxes, gt_boxes, reduction='none')
 
 
-        # Normalize the total loss by the number of boxes
-        loss = loss_ae.sum() / num_boxes
+    #     # Normalize the total loss by the number of boxes
+    #     loss = loss_ae.sum() / num_boxes
+
+    #     losses = {}
+    #     losses['loss_ae'] = loss  
+
+    #     return losses
+    
+    def autoencoder_loss(self, reconstructed):
+        
+        # Compute MSE loss between predicted and GT boxes (reduction='sum' over individual elements)
+        loss_ae = F.mse_loss(reconstructed['pred_boxes'], reconstructed['input'], reduction='mean')
 
         losses = {}
-        losses['loss_ae'] = loss  
+        losses['loss_ae'] = loss_ae 
 
         return losses
         
@@ -539,22 +549,22 @@ class ClipMatcher(SetCriterion):
                                               dim=1)
             return new_matched_indices
         
-        def match_for_single_decoder_layer_AE(unmatched_outputs, matcher):
-            # assert not unmatched_outputs['pred_boxes'].shape[1] !=100, f"Error: unmatched_outputs first dimension should not be 100, but got {unmatched_outputs['pred_boxes'].shape[1]}"
-            new_track_indices = matcher(unmatched_outputs,
-                                             [untracked_gt_instances])  # list[tuple(src_idx, tgt_idx)]
+        # def match_for_single_decoder_layer_AE(unmatched_outputs, matcher):
+        #     # assert not unmatched_outputs['pred_boxes'].shape[1] !=100, f"Error: unmatched_outputs first dimension should not be 100, but got {unmatched_outputs['pred_boxes'].shape[1]}"
+        #     new_track_indices = matcher(unmatched_outputs,
+        #                                      [untracked_gt_instances])  # list[tuple(src_idx, tgt_idx)]
             
-            src_idx = new_track_indices[0][0]
-            tgt_idx = new_track_indices[0][1]
-            # Ensure src_idx and tgt_idx are not empty
-            # Create dynamic indices based on the number of unmatched outputs
-            unmatched_reconstruct_idxes = torch.arange(unmatched_outputs['pred_boxes'].shape[1], device=pred_logits_i.device, dtype=torch.int64)
+        #     src_idx = new_track_indices[0][0]
+        #     tgt_idx = new_track_indices[0][1]
+        #     # Ensure src_idx and tgt_idx are not empty
+        #     # Create dynamic indices based on the number of unmatched outputs
+        #     unmatched_reconstruct_idxes = torch.arange(unmatched_outputs['pred_boxes'].shape[1], device=pred_logits_i.device, dtype=torch.int64)
             
-            # concat src and tgt.
-            new_matched_indices = torch.stack([unmatched_reconstruct_idxes[src_idx], untracked_tgt_indexes[tgt_idx]],
-                                              dim=1).to(pred_logits_i.device)
+        #     # concat src and tgt.
+        #     new_matched_indices = torch.stack([unmatched_reconstruct_idxes[src_idx], untracked_tgt_indexes[tgt_idx]],
+        #                                       dim=1).to(pred_logits_i.device)
                                               
-            return new_matched_indices
+        #     return new_matched_indices
 
         # step4. do matching between the unmatched slots and GTs.
         unmatched_outputs = {
@@ -643,7 +653,7 @@ class ClipMatcher(SetCriterion):
         active_track_masks_primarly = track_instances.pred_masks[active_idxes]
         if len(active_track_masks_primarly) > 0: 
             gt_masks = gt_instances_i.masks[track_instances.matched_gt_idxes[active_idxes]].float()
-            plot_and_save_masks(active_idxes, track_instances.pred_masks, gt_masks, gt_boxes, active_track_boxes, '/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR_mask_DN_DAB/output/criterion_AE')
+            plot_and_save_masks(active_idxes, track_instances.pred_masks, gt_masks, gt_boxes, active_track_boxes, '/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR_mask_DN_DAB/output/criterion_AE_version2')
 
         # active_track_masks = active_track_masks.sigmoid()
         # step7. merge the unmatched pairs and the matched pairs.
@@ -770,20 +780,37 @@ class ClipMatcher(SetCriterion):
            
                
         # Calculating reconstruction loss for reference_points
+        # if 'output_autoencoder' in outputs:
+        #     output_autoencoder = outputs['output_autoencoder']
+        #     reconstructed_points = {
+        #         'pred_boxes' : output_autoencoder['reconstructed_ref_points'].sigmoid(),
+        #     }
+        #     # original_points = outputs['output_autoencoder']['original_ref_points']
+            
+        #     ae_matched_indices_layer = match_for_single_decoder_layer_AE(reconstructed_points, self.matcher)
+
+        #     # Calculate the autoencoder loss
+        #     ae_loss_dict = self.autoencoder_loss(output_autoencoder, 
+        #                                         gt_instances=[gt_instances_i],
+        #                                         indices=[(ae_matched_indices_layer[:, 0], ae_matched_indices_layer[:, 1])],
+        #                                         num_boxes=1)
+
+        #     # Update the losses dictionary with autoencoder loss for the current frame
+        #     for key, value in ae_loss_dict.items():
+        #         self.losses_dict.update({'frame_{}_AE_{}'.format(self._current_frame_idx, key): value})
+        
         if 'output_autoencoder' in outputs:
             output_autoencoder = outputs['output_autoencoder']
             reconstructed_points = {
                 'pred_boxes' : output_autoencoder['reconstructed_ref_points'].sigmoid(),
+                'input' : output_autoencoder['original_ref_points'],
             }
             # original_points = outputs['output_autoencoder']['original_ref_points']
             
-            ae_matched_indices_layer = match_for_single_decoder_layer_AE(reconstructed_points, self.matcher)
+            # ae_matched_indices_layer = match_for_single_decoder_layer_AE(reconstructed_points, self.matcher)
 
             # Calculate the autoencoder loss
-            ae_loss_dict = self.autoencoder_loss(output_autoencoder, 
-                                                gt_instances=[gt_instances_i],
-                                                indices=[(ae_matched_indices_layer[:, 0], ae_matched_indices_layer[:, 1])],
-                                                num_boxes=1)
+            ae_loss_dict = self.autoencoder_loss(reconstructed_points)
 
             # Update the losses dictionary with autoencoder loss for the current frame
             for key, value in ae_loss_dict.items():
@@ -957,72 +984,27 @@ class MOTR(nn.Module):
             self.class_embed = nn.ModuleList([self.class_embed for _ in range(num_pred)])
             self.bbox_embed = nn.ModuleList([self.bbox_embed for _ in range(num_pred)])
             self.transformer.decoder.bbox_embed = None
-        if two_stage:
-            # hack implementation for two-stage
-            # self.transformer.decoder.class_embed = self.class_embed
-            for box_embed in self.bbox_embed:
-                nn.init.constant_(box_embed.layers[-1].bias.data[2:], 0.0)
+        # if two_stage:
+        #     # hack implementation for two-stage
+        #     # self.transformer.decoder.class_embed = self.class_embed
+        #     for box_embed in self.bbox_embed:
+        #         nn.init.constant_(box_embed.layers[-1].bias.data[2:], 0.0)
                 
-        ##############################################
-        # (1) Adding segmentation head
+        
+        # segmentation head
         hidden_dim, nheads = self.transformer.d_model, self.transformer.nhead
         hid_dim = hidden_dim * 2
-        
         num_feature_levels = 3
         self.PerPixelEmbedding = PerPixelEmbedding(
             backbone.output_shape(), 
             hidden_dim, 
             hidden_dim,
             norm = None) # Initialized
-        
-        
-        # Mask prediction
         self.forward_prediction_heads = self.transformer.forward_prediction_heads
         self.dn_post_process = self.transformer.dn_post_process
-        
-        # self.FPNEncoder = FPNEncoder(
-        #     backbone.output_shape(), 
-        #     hidden_dim, 
-        #     hidden_dim,
-        #     norm = None) # Initialized
-        
         self.AxialBlock = AxialBlock(hidden_dim,hidden_dim // 2) # Initialized
         self.initial_pred = initial_pred
-        
-        
-        # seg_branch without iniliazing
-        # seg_branch = []
-        # for _ in range(self.num_seg_fcs):
-        #     seg_branch.append(Linear(hidden_dim, hidden_dim))
-        #     seg_branch.append(nn.ReLU())
-        # seg_branch.append(Linear(hidden_dim, hidden_dim))
-        # seg_branch = nn.Sequential(*seg_branch)
-        # self.seg_branches = nn.ModuleList(
-        #     [seg_branch for _ in range(num_pred)])
-        
-        
-        # # seg_branch with iniliazing
-        # seg_branch = []
-        # for _ in range(self.num_seg_fcs):
-        #     layer = Linear(hidden_dim, hidden_dim)
-        #     init.kaiming_uniform_(layer.weight, nonlinearity='relu')
-        #     seg_branch.append(layer)
-        #     seg_branch.append(nn.ReLU())
-        # last_layer = Linear(hidden_dim, hidden_dim)
-        # init.kaiming_uniform_(last_layer.weight, nonlinearity='relu')
-        # seg_branch.append(last_layer)
-        # seg_branch = nn.Sequential(*seg_branch)
-        # self.seg_branches = nn.ModuleList([seg_branch for _ in range(num_pred)])
-        
-        
-        # self.pos_cross_attention = CrossAttentionLayer(
-        #     d_model=hidden_dim, nhead=8, dropout=0, activation="relu",
-        #     normalize_before=False
-        # ) # Initialized
-        
-        ##############################################
-        
-        
+
         self.post_process = TrackerPostProcess()
         self.track_base = RuntimeTrackerBase()
         self.criterion = criterion
@@ -1061,43 +1043,27 @@ class MOTR(nn.Module):
         track_instances = Instances((1, 1))
         
         # num_queries, dim = self.query_embed.weight.shape  # (300, 512)
-        num_queries = self.transformer.get_value()
-        dim = 512
-        
-        
+        # num_queries = self.transformer.get_value()
+        # dim = 512
+        num_queries, dim  = self.transformer.init_det.weight.shape
+        # print('num_queries:', num_queries, 'dim:', dim)
+    
         # track_instances.ref_pts = self.transformer.reference_points(self.query_embed.weight[:, :dim // 2])
         # track_instances.query_pos = self.query_embed.weight
-        track_instances.query_pos = self.transformer.init_det
-        
-        # assert track_instances.query_pos.shape[0] == 300, "track_instances.query_pos in generate function must have exactly 300 elements, but got {}".format(track_instances.query_pos.shape[0])
+        track_instances.query_pos = self.transformer.init_det.weight
+        track_instances.ref_pts = self.transformer.reference_points(self.transformer.init_det.weight[:, :dim // 2])
         track_instances.output_embedding = torch.zeros((num_queries, dim >> 1), device=device) # It should be updated based on the num_queries (track+detect)
-        # assert track_instances.output_embedding.shape[0] == 300, "track_instances.output_embedding in generate function must have exactly 300 elements, but got {}".format(track_instances.output_embedding.shape[0])
-
-        # print('track_instances.query_pos:', track_instances.query_pos.shape, 'track_instances.output_embedding:', track_instances.output_embedding.shape)
-        # assert len(track_instances) == 300, "len(track_instances) must have exactly 300 elements, but got {}".format(len(track_instances))
-
         track_instances.obj_idxes = torch.full((len(track_instances),), -1, dtype=torch.long, device=device)
         track_instances.matched_gt_idxes = torch.full((len(track_instances),), -1, dtype=torch.long, device=device)
         track_instances.disappear_time = torch.zeros((len(track_instances), ), dtype=torch.long, device=device)
-        
-        # (16) Adding part to handle iou from masks and boxes
-        # track_instances.iou = torch.zeros((len(track_instances),), dtype=torch.float, device=device)
         track_instances.iou_boxes = torch.zeros((len(track_instances),), dtype=torch.float, device=device)
         track_instances.iou_masks = torch.zeros((len(track_instances),), dtype=torch.float, device=device)
-        
         track_instances.scores = torch.zeros((len(track_instances),), dtype=torch.float, device=device)
-        # track_instances.scores = torch.zeros((300,), dtype=torch.float, device=device)
-        # assert track_instances.scores.shape[0] == 300, "track_instances.scores in generate function must have exactly 300 elements, but got {}".format(track_instances.scores.shape[0])
         track_instances.pred_boxes = torch.zeros((len(track_instances), 4), dtype=torch.float, device=device)
-        
-        # (4) Initializing pred_masks in track_instances dictionary
-        # height = self.mask_height
-        # width = self.mask_width
-        # with torch.no_grad():
+
         height = frame_shape[0]
         width = frame_shape[1]
         track_instances.pred_masks = torch.zeros((len(track_instances), height, width), dtype=torch.float, device=device)
-        
         track_instances.pred_logits = torch.zeros((len(track_instances), self.num_classes), dtype=torch.float, device=device)
         
         mem_bank_len = self.mem_bank_len
@@ -1105,7 +1071,6 @@ class MOTR(nn.Module):
         track_instances.mem_padding_mask = torch.ones((len(track_instances), mem_bank_len), dtype=torch.bool, device=device)
         track_instances.save_period = torch.zeros((len(track_instances), ), dtype=torch.float32, device=device)
 
-        # return track_instances.to(self.query_embed.weight.device)
         return track_instances.to(device)
 
     def clear(self):
@@ -1137,61 +1102,66 @@ class MOTR(nn.Module):
 
     def _forward_single_image(self, samples, targets, track_instances: Instances):
         
-        def save_cam_activations(activations_list, dot_product_output, reshape_dims, pred_masks, cam_names, output_dir):
-            # Ensure the output directory exists
-            os.makedirs(output_dir, exist_ok=True)
-            num_activations = len(activations_list)
+        def plot_out_boxes_on_samples(samples, out_boxes, output_directory):
+            """
+            Plot bounding boxes (out_boxes) on the input samples (nested tensor) and save the images with a timestamp.
             
-            pred_masks = pred_masks.squeeze()
-            cam_pred_masks = pred_masks.mean(dim=0)  # Average across queries
-            cam_pred_masks = (cam_pred_masks - cam_pred_masks.min()) / (cam_pred_masks.max() - cam_pred_masks.min())  # Normalize
-            # Create a figure with an additional subplot for the combined CAM
-            plt.figure(figsize=(20 + 5, 12))  
-            # plt.figure(figsize=(20 + 5, 11))
-
-            # Plot individual CAMs
-            for i, activations in enumerate(activations_list):
-                act = activations.squeeze()  # Adjust dimensions appropriately
-                weights = torch.randn(act.size(0)).to(act.device)  # Random weights for illustration
-                cam = (weights[:, None, None] * act).sum(dim=0)
-                cam = F.relu(cam)  # Use ReLU to only keep positive influences
-                cam = (cam - cam.min()) / (cam.max() - cam.min())  # Normalize
-
-                ax = plt.subplot(1, num_activations + 2, i + 1)  # Adjust subplot index
-                ax.imshow(cam.detach().cpu(), cmap='jet')
-                ax.axis('off')
-                # ax.set_title(f'CAM {i + 1}')
-                title = cam_names[i] if cam_names and len(cam_names) > i else f'CAM {i + 1}'
-                ax.set_title(title)
-
-            # Generate and plot the combined CAM from cross-attention map
-            # reshaped_weights = cross_attn_map.view(-1, *reshape_dims)
-            # average_weights = reshaped_weights.mean(dim=0)
-            # normalized_weights = (average_weights - average_weights.min()) / (average_weights.max() - average_weights.min())
-
-            # ax = plt.subplot(1, num_activations + 2, num_activations + 1)  # Last subplot for combined CAM
-            # ax.imshow(normalized_weights.detach().cpu().numpy(), cmap='jet', interpolation='nearest')
-            # # plt.colorbar()
-            # ax.set_title('Cross_attention')
-            # ax.axis('off')
-            dot_product_avg = dot_product_output.mean(dim=0)
-            ax = plt.subplot(1, num_activations + 2, num_activations + 1)
-            ax.imshow(dot_product_avg.detach().cpu().numpy(), cmap='jet', interpolation='nearest')
-            ax.set_title('Dot Product CAM')
-            ax.axis('off')
+            Args:
+                samples (NestedTensor): Input sample images (batch size, channels, height, width).
+                out_boxes (Tensor): Predicted bounding boxes (batch size, num_boxes, 4).
+                output_directory (str): Directory to save the plotted images.
+            """
             
-            # Add subplot for pred_masks CAM
-            ax = plt.subplot(1, num_activations + 2, num_activations + 2)  # Extra subplot for pred_masks CAM
-            ax.imshow(cam_pred_masks.detach().cpu().numpy(), cmap='jet', interpolation='nearest')
-            ax.set_title('Pred_Masks_CAM')
-            ax.axis('off')
+            # Ensure that the images are in the proper format (denormalized if needed)
+            images = samples.tensors.cpu()  # Extract images from the nested tensor (assumes batch format)
 
-            # Save the figure
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f'All_CAMs_{timestamp}.png'
-            filepath = os.path.join(output_dir, filename)
-            plt.savefig(filepath)
-            plt.close()
+            # Ensure out_boxes is on CPU
+            out_boxes = out_boxes.detach().cpu()
+
+            # Loop through the batch
+            for i, img in enumerate(images):
+                # Convert the image tensor (C, H, W) to numpy format (H, W, C)
+                img_np = img.permute(1, 2, 0).numpy()  # Permute from (C, H, W) to (H, W, C)
+
+                # Normalize the image to range [0, 1] if necessary
+                if img_np.max() > 1:
+                    img_np = img_np / 255.0
+
+                # Create a plot for each image in the batch
+                fig, ax = plt.subplots(1)
+                ax.imshow(img_np)
+
+                # Get the bounding boxes for this image
+                boxes = out_boxes[i]  # (num_boxes, 4), in [cx, cy, w, h] normalized format
+
+                # Get the height and width of the image
+                img_h, img_w = img_np.shape[:2]
+
+                # Loop through each bounding box
+                for box in boxes:
+                    # Convert from [cx, cy, w, h] to [x1, y1, w, h] (pixel coordinates)
+                    cx, cy, w, h = box
+                    cx *= img_w
+                    cy *= img_h
+                    w *= img_w
+                    h *= img_h
+                    x1 = cx - w / 2
+                    y1 = cy - h / 2
+
+                    # Create a rectangle patch (in red)
+                    rect = patches.Rectangle((x1, y1), w, h, linewidth=2, edgecolor='r', facecolor='none')
+                    ax.add_patch(rect)
+
+                # Generate a timestamp for each image
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+
+                # Create an output file path with a unique filename
+                output_file = os.path.join(output_directory, f"image_{i}_{timestamp}.png")
+                
+                # Save the plot to a file
+                plt.savefig(output_file)
+                plt.close(fig)
+
             
             
         # print('sample shape:', samples.tensors.shape) #torch.Size([1, 3, 672, 932])
@@ -1233,7 +1203,8 @@ class MOTR(nn.Module):
         # hs, init_reference, inter_references, out, mask_dict = self.transformer(srcs, masks, pos, embeddings,  targets, ref_pts=None)
 
         # hs, init_reference, inter_references, mask_dict, predictions_class, predictions_mask, interm_outputs = self.transformer(srcs, masks, pos, embeddings, attention_embedding,  targets, track_instances.query_pos, ref_pts=None)
-        hs, init_reference, inter_references, mask_dict, interm_outputs, output_autoencoder = self.transformer(srcs, masks, pos, embeddings, attention_embedding,  targets, track_instances.query_pos, ref_pts=None)
+        # hs, init_reference, inter_references, mask_dict, interm_outputs, output_autoencoder = self.transformer(srcs, masks, pos, embeddings, attention_embedding,  targets, track_instances.query_pos, ref_pts=None)
+        hs, init_reference, inter_references, mask_dict, interm_outputs = self.transformer(srcs, masks, pos, embeddings, attention_embedding,  targets, track_instances.query_pos, ref_pts=track_instances.ref_pts)
         predictions_class = []
         predictions_mask = []
         for i, output in enumerate(hs):
@@ -1249,16 +1220,6 @@ class MOTR(nn.Module):
         else:
             out_boxes = self.pred_box(inter_references, hs)
             assert not torch.isnan(out_boxes).any(), "NaN values detected in out_boxes in initial_pred else."
-            
-        if mask_dict is not None:
-            predictions_mask=torch.stack(predictions_mask)
-            predictions_class=torch.stack(predictions_class)
-            predictions_class, out_boxes,predictions_mask=\
-                self.dn_post_process(predictions_class,out_boxes,mask_dict,predictions_mask) # Removing the denoising part
-            predictions_class,predictions_mask=list(predictions_class),list(predictions_mask)
-            
-        predictions_class[-1] = predictions_class[-1] + 0.0*self.transformer.label_enc.weight.sum()
-        assert not torch.isnan(out_boxes[-1]).any(), "NaN values detected in out_boxes[-1]."
         
         
         hs  = torch.cat(hs, dim=0).unsqueeze(1)
@@ -1278,10 +1239,18 @@ class MOTR(nn.Module):
                 tmp[..., :2] += reference
             
         ref_pts_all = torch.cat([init_reference[None][:, :, :, -2:], inter_references[:, :, :, :2]], dim=0)
-    
-        
-        # out = {'pred_logits': out_interm["pred_logits"], 'pred_boxes': out_interm["pred_boxes"], 'ref_pts': ref_pts_all[5], 'pred_masks': out_interm["pred_masks"]}
-        
+        # print('ref_pts_all before:',ref_pts_all.shape)
+        if mask_dict is not None:
+            predictions_mask=torch.stack(predictions_mask)
+            predictions_class=torch.stack(predictions_class)
+            predictions_class, out_boxes,predictions_mask, ref_pts_all=\
+                self.dn_post_process(predictions_class,out_boxes,mask_dict,predictions_mask, ref_pts_all)
+            # print('ref_pts_all:',ref_pts_all.shape)
+            predictions_class,predictions_mask=list(predictions_class),list(predictions_mask)
+            
+        predictions_class[-1] = predictions_class[-1] + 0.0*self.transformer.label_enc.weight.sum()
+        assert not torch.isnan(out_boxes[-1]).any(), "NaN values detected in out_boxes[-1]."
+        # plot_out_boxes_on_samples(samples, out_boxes[-1], '/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR_mask_DN_DAB/output/out_boxes_AE')
         out = {
             'pred_logits': predictions_class[-1],
             # 'pred_masks': predictions_mask[-1].sigmoid(),
@@ -1293,7 +1262,7 @@ class MOTR(nn.Module):
         }
         out['ref_pts'] =  ref_pts_all[5]
         out['interm_outputs'] = interm_outputs # query selection from encoder
-        out['output_autoencoder'] = output_autoencoder # Reconstructing 4D boxes from higher dimension
+        # out['output_autoencoder'] = output_autoencoder # Reconstructing 4D boxes from higher dimension
         
         return out, mask_dict
     
@@ -1630,7 +1599,7 @@ def build(args):
     num_points = 12544
     
     dn_losses = []
-    dn = "yes"
+    dn = False
     initial_pred = True
 
     criterion = ClipMatcher(num_classes, matcher=img_matcher, weight_dict=weight_dict, losses=losses, num_points = num_points, oversample_ratio = oversample_ratio, importance_sample_ratio = importance_sample_ratio, dn_losses = dn_losses, dn = dn)

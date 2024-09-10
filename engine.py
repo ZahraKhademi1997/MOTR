@@ -682,7 +682,7 @@ def train_one_epoch_mot(model: torch.nn.Module, criterion: torch.nn.Module,
     
     #####################################################################
     # () Defining function to log gradient of different part of the model 
-    writer_grad = SummaryWriter('/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR_mask_DN_DAB/outputs/logs_AE/logs_grad') 
+    writer_grad = SummaryWriter('/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR_mask_DN_DAB/outputs/logs/logs_grad') 
     def log_gradients(model, writer_grad, epoch, iteration):
         # Check if the model is wrapped in DistributedDataParallel
         if isinstance(model, torch.nn.parallel.DistributedDataParallel):
@@ -702,9 +702,12 @@ def train_one_epoch_mot(model: torch.nn.Module, criterion: torch.nn.Module,
             'box_embed' : model.bbox_embed,
             'AxialBlock' : model.AxialBlock,
             'pos_cross_attention' : model.transformer.pos_cross_attention,
-            'autoencoder' : model.transformer.autoencoder,
-            'reference_point_transform' : model.transformer.reference_point_transform,
-            'post_process': model.post_process,
+            # 'autoencoder' : model.transformer.autoencoder,
+            # 'kernel' : model.transformer.kernel,
+            'transformer ref_points' : model.transformer.ref_point_head,
+            'transformer reference points' : model.transformer.reference_points,
+            'transformer init_det' :  model.transformer.init_det, 
+            # 'post_process': model.post_process,
             
         }
 

@@ -163,6 +163,7 @@ class QueryInteractionModule(QueryInteractionBase):
     def _update_track_embedding(self, track_instances: Instances) -> Instances:
         if len(track_instances) == 0:
             return track_instances
+
         dim = track_instances.query_pos.shape[1]
         out_embed = track_instances.output_embedding
         query_pos = track_instances.query_pos[:, :dim // 2]
@@ -192,7 +193,7 @@ class QueryInteractionModule(QueryInteractionBase):
         query_feat = self.norm_feat(query_feat)
         track_instances.query_pos[:, dim//2:] = query_feat
 
-        track_instances.ref_pts = inverse_sigmoid(track_instances.pred_boxes[:, :2].detach().clone())
+        track_instances.ref_pts = inverse_sigmoid(track_instances.pred_boxes.detach().clone())
         return track_instances
 
    
@@ -202,6 +203,7 @@ class QueryInteractionModule(QueryInteractionBase):
         # print('active_track_instances:', active_track_instances)
         active_track_instances = self._update_track_embedding(active_track_instances)
         init_track_instances: Instances = data['init_track_instances']
+        
         # print('active_track_instances:', active_track_instances)
         # print('init_track_instances:',init_track_instances)
         # print('init_track_instances in qim:', init_track_instances['masks'].shape)
