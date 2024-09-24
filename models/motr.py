@@ -203,8 +203,8 @@ class ClipMatcher(SetCriterion):
             gt_labels_target = gt_labels_target.to(src_logits)
             loss_ce = sigmoid_focal_loss(src_logits.flatten(1),
                                              gt_labels_target.flatten(1),
-                                             alpha=-1,
-                                             gamma=0,
+                                             alpha=0.25,
+                                             gamma=2,
                                              num_boxes=num_boxes, mean_in_dim1=False)
             loss_ce = loss_ce.sum()
         else:
@@ -1092,7 +1092,7 @@ class MOTR(nn.Module):
         track_instances.pred_logits = frame_res['pred_logits'][0]
         track_instances.pred_boxes = frame_res['pred_boxes'][0]
         track_instances.pred_masks = frame_res['pred_masks'][0]
-        print('track_instances.pred_masks:', track_instances.pred_masks.shape)
+        # print('track_instances.pred_masks:', track_instances.pred_masks.shape)
         track_instances.output_embedding = frame_res['hs'][0]
 
         if self.training:
@@ -1174,10 +1174,19 @@ class MOTR(nn.Module):
             if track_instances is None:
                 track_instances = self._generate_empty_tracks(frame_shape, device)
             else:
-                print('frame_shape:', frame_shape, 'track_instances:', track_instances.pred_masks.shape, 'generated:', self._generate_empty_tracks(frame_shape, device).pred_masks.shape)
-                track_instances = Instances.cat([
-                    self._generate_empty_tracks(frame_shape, device),
-                    track_instances])
+                # print('frame_shape:', frame_shape, 'track_instances:', track_instances.pred_masks.shape, 'generated:', self._generate_empty_tracks(frame_shape, device).pred_masks.shape)
+                empty_tracks = self._generate_empty_tracks(frame_shape, device)
+                new_shape = empty_tracks.pred_masks.shape[-2:]
+                existing_shape = track_instances.pred_masks.shape[-2:]
+                if new_shape != existing_shape:
+                    empty_tracks.pred_masks = F.interpolate(
+                        empty_tracks.pred_masks.unsqueeze(0),
+                        size=existing_shape,
+                        mode="bilinear",
+                        align_corners=False
+                    ).squeeze(0)
+                        
+                track_instances = Instances.cat([empty_tracks, track_instances])
                 
                 
             if self.use_checkpoint and frame_index < len(frames) - 2:
@@ -1192,7 +1201,8 @@ class MOTR(nn.Module):
                         frame_res['ref_pts'],
                         frame_res['hs'],
                         *[aux['pred_logits'] for aux in frame_res['aux_outputs']],
-                        *[aux['pred_boxes'] for aux in frame_res['aux_outputs']]
+                        *[aux['pred_boxes'] for aux in frame_res['aux_outputs']],
+                        # *[aux['pred_masks'] for aux in frame_res['aux_outputs']]
                     )
 
                 args = [frame] + [track_instances.get(k) for k in keys]
