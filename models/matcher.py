@@ -167,7 +167,18 @@ class HungarianMatcher(nn.Module):
             # Compute the L1 cost between boxes
             cost_bbox = torch.cdist(out_bbox, tgt_bbox, p=1)
 
-            # Compute the giou cost betwen boxes
+            # output_dir_src = "/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR_mask_DN_DAB/outputs/out_bbox.txt"
+            # with open (output_dir_src, 'w') as f:
+            #     f.write (str(out_bbox))
+                
+            # output_dir_src_convert = "/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR_mask_DN_DAB/outputs/out_bbox_convert.txt"
+            # with open (output_dir_src_convert, 'w') as f:
+            #     f.write (str(box_cxcywh_to_xyxy(out_bbox)))
+                
+            # output_dir_tgt = "/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR_mask_DN_DAB/outputs/tgt_bbox.txt"
+            # with open (output_dir_tgt, 'w') as f:
+            #     f.write (str(tgt_bbox))
+                
             cost_giou = -generalized_box_iou(box_cxcywh_to_xyxy(out_bbox),
                                              box_cxcywh_to_xyxy(tgt_bbox))
             

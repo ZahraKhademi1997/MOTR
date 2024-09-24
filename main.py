@@ -124,6 +124,9 @@ def get_args_parser():
     parser.add_argument('--lr_mask_embed_names', default=["mask_embed"], type=str, nargs='+')
     parser.add_argument('--lr_mask_embed', default=1e-3, type=float)
     
+    parser.add_argument('--lr_bbox_embed_names', default=["bbox_embed"], type=str, nargs='+')
+    parser.add_argument('--lr_bbox_embed', default=1e-3, type=float)
+    
     #################################################################################
     parser.add_argument('--batch_size', default=2, type=int)
     ##################################################################################
@@ -139,7 +142,7 @@ def get_args_parser():
     parser.add_argument('--lr_drop', default=40, type=int)
     parser.add_argument('--save_period', default=2, type=int)
     parser.add_argument('--lr_drop_epochs', default=None, type=int, nargs='+')
-    parser.add_argument('--clip_max_norm', default=0.1, type=float,
+    parser.add_argument('--clip_max_norm', default=0.2, type=float,
                         help='gradient clipping max norm')
 
     parser.add_argument('--meta_arch', default='deformable_detr', type=str)
@@ -235,7 +238,7 @@ def get_args_parser():
     ###########################################################################
     parser.add_argument('--cls_loss_coef', default=3, type=float)
     parser.add_argument('--bbox_loss_coef', default=5, type=float)
-    parser.add_argument('--giou_loss_coef', default=2, type=float)
+    parser.add_argument('--giou_loss_coef', default=3, type=float)
     # parser.add_argument('--focal_alpha', default=0.25, type=float)
     parser.add_argument('--focal_alpha', default=1.25, type=float)
     parser.add_argument('--ae_loss_coef', default=2, type=float)
@@ -573,7 +576,7 @@ def main(args):
     np.random.seed(seed)
     random.seed(seed)
             
-    kf = KFold(n_splits=10, shuffle=True, random_state=seed)
+    kf = KFold(n_splits=5, shuffle=True, random_state=seed)
 
 
     print("Start training")
@@ -588,7 +591,7 @@ def main(args):
         for fold, (train_index, val_index) in enumerate(kf.split(np.arange(len(dataset_train)))):
             print(f"Training on fold {fold+1}")
             
-            writer = SummaryWriter(log_dir=f"/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR_mask_DN_DAB/outputs/logs_AE/logs_loss/fold_{fold+1}")
+            writer = SummaryWriter(log_dir=f"/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR_mask_DN_DAB/outputs/logs_alpha-1/logs_loss/fold_{fold+1}")
     
             # Model initialization
             model, criterion, postprocessors = build_model(args)
@@ -643,6 +646,7 @@ def main(args):
                         and not match_name_keywords(n, args.lr_AxialBlock_names)
                         and not match_name_keywords(n, args.lr_pos_cross_attention_names)
                         and not match_name_keywords(n, args.lr_mask_embed_names)
+                        and not match_name_keywords(n, args.lr_bbox_embed_names)
                         and p.requires_grad],
                     "lr": args.lr,
                     # "weight_decay": args.main_weight_decay,
@@ -653,6 +657,14 @@ def main(args):
                     "lr": args.lr_backbone,
                     # "weight_decay": args.backbone_weight_decay,
                 },
+                
+                # {
+                #     "params": [p for n, p in model_without_ddp.named_parameters() 
+                #             if match_name_keywords(n, args.lr_transformer_names) and p.requires_grad],
+                #     "lr": args.lr_transformer,
+                #     # "weight_decay": args.backbone_weight_decay,
+                # },
+                
                 {
                     "params": [p for n, p in model_without_ddp.named_parameters() 
                             if match_name_keywords(n, args.lr_linear_proj_names) and p.requires_grad],
@@ -695,6 +707,15 @@ def main(args):
                         if match_name_keywords(n, args.lr_mask_embed_names) and p.requires_grad
                     ],
                     "lr": args.lr_mask_embed,
+                    # "weight_decay": args.mask_head_weight_decay, 
+                },   
+                
+                {
+                    "params": [
+                        p for n, p in model_without_ddp.transformer.decoder.named_parameters()
+                        if match_name_keywords(n, args.lr_bbox_embed_names) and p.requires_grad
+                    ],
+                    "lr": args.lr_bbox_embed,
                     # "weight_decay": args.mask_head_weight_decay, 
                 },   
             ]

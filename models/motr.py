@@ -10,7 +10,7 @@ import cv2
 import torch.nn.functional as F
 from torch import nn, Tensor
 from typing import List
-from util.box_ops import masks_to_boxes
+from util.box_ops import masks_to_boxes, normalize_boxes
 from util import box_ops, checkpoint
 from util.misc import (NestedTensor, nested_tensor_from_tensor_list,
                        accuracy, get_world_size, interpolate, get_rank,
@@ -483,9 +483,6 @@ class ClipMatcher(SetCriterion):
         track_instances: Instances = outputs_without_aux['track_instances']
         pred_logits_i = track_instances.pred_logits  # predicted logits of i-th image.
         pred_boxes_i = track_instances.pred_boxes  # predicted boxes of i-th image.
-        assert not torch.isnan(pred_boxes_i).any(), "NaN found in pred_boxes_i in MOTR"
-        
-        # (11) Adding pred_masks
         pred_masks_i = track_instances.pred_masks  # predicted masks of i-th image.
         
         obj_idxes = gt_instances_i.obj_ids
@@ -494,8 +491,6 @@ class ClipMatcher(SetCriterion):
         outputs_i = {
             'pred_logits': pred_logits_i.unsqueeze(0),
             'pred_boxes': pred_boxes_i.unsqueeze(0),
-            
-            # (12) Adding pred_masks
             'pred_masks': pred_masks_i.unsqueeze(0),
             
         }
@@ -535,6 +530,9 @@ class ClipMatcher(SetCriterion):
         untracked_gt_instances = gt_instances_i[untracked_tgt_indexes]
 
         def match_for_single_decoder_layer(unmatched_outputs, matcher):
+            # output_dir_unmatched_outputs = f"/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR_mask_DN_DAB/outputs/layer_unmatched_outputs.txt"
+            # with open(output_dir_unmatched_outputs, 'w') as f:
+            #     f.write(str(unmatched_outputs['pred_boxes']))
             new_track_indices = matcher(unmatched_outputs,
                                              [untracked_gt_instances])  # list[tuple(src_idx, tgt_idx)]
             
@@ -548,6 +546,7 @@ class ClipMatcher(SetCriterion):
             new_matched_indices = torch.stack([unmatched_track_idxes[src_idx], untracked_tgt_indexes[tgt_idx]],
                                               dim=1)
             return new_matched_indices
+        
         
         # def match_for_single_decoder_layer_AE(unmatched_outputs, matcher):
         #     # assert not unmatched_outputs['pred_boxes'].shape[1] !=100, f"Error: unmatched_outputs first dimension should not be 100, but got {unmatched_outputs['pred_boxes'].shape[1]}"
@@ -574,8 +573,11 @@ class ClipMatcher(SetCriterion):
             # (14) Adding pred_masks
             'pred_masks': track_instances.pred_masks[unmatched_track_idxes].unsqueeze(0),
         }
-        assert not torch.isnan(unmatched_outputs['pred_boxes']).any(), "NaN found in unmatched_outputs[pred_boxes] in MOTR"
-
+        # assert not torch.isnan(unmatched_outputs['pred_boxes']).any(), "NaN found in unmatched_outputs[pred_boxes] in MOTR"
+        # output_dir_unmatched_outputs_bbox = "/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR_mask_DN_DAB/outputs/unmatched_outputs_bbox.txt"
+        # with open (output_dir_unmatched_outputs_bbox, 'w') as f:
+        #     f.write (str(track_instances.pred_boxes[unmatched_track_idxes]))
+            
         new_matched_indices = match_for_single_decoder_layer(unmatched_outputs, self.matcher)
 
         # step5. update obj_idxes according to the new matching result.
@@ -585,7 +587,7 @@ class ClipMatcher(SetCriterion):
         # step6. calculate iou.
         active_idxes = (track_instances.obj_idxes >= 0) & (track_instances.matched_gt_idxes >= 0)
         active_track_boxes = track_instances.pred_boxes[active_idxes]
-        assert not torch.isnan(active_track_boxes).any(), "NaN found in active_track_boxes in MOTR"
+        # assert not torch.isnan(active_track_boxes).any(), "NaN found in active_track_boxes in MOTR"
 
         
         if len(active_track_boxes) > 0:
@@ -653,7 +655,7 @@ class ClipMatcher(SetCriterion):
         active_track_masks_primarly = track_instances.pred_masks[active_idxes]
         if len(active_track_masks_primarly) > 0: 
             gt_masks = gt_instances_i.masks[track_instances.matched_gt_idxes[active_idxes]].float()
-            plot_and_save_masks(active_idxes, track_instances.pred_masks, gt_masks, gt_boxes, active_track_boxes, '/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR_mask_DN_DAB/output/criterion_AE_version2')
+            plot_and_save_masks(active_idxes, track_instances.pred_masks, gt_masks, gt_boxes, active_track_boxes, '/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR_mask_DN_DAB/output/criterion_init')
 
         # active_track_masks = active_track_masks.sigmoid()
         # step7. merge the unmatched pairs and the matched pairs.
@@ -702,6 +704,10 @@ class ClipMatcher(SetCriterion):
         # Hungarian between Aux indices
         if 'aux_outputs' in outputs:
             for i, aux_outputs in enumerate(outputs['aux_outputs']):
+                # output_dir_aux_bbox = f"/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR_mask_DN_DAB/outputs/layer_{i}_aux_bbox.txt"
+                # with open(output_dir_aux_bbox, 'w') as f:
+                #     f.write(str(aux_outputs['pred_boxes'][0, unmatched_track_idxes]))
+                    
                 unmatched_outputs_layer = {
                     'pred_logits': aux_outputs['pred_logits'][0, unmatched_track_idxes].unsqueeze(0),
                     'pred_boxes': aux_outputs['pred_boxes'][0, unmatched_track_idxes].unsqueeze(0),
@@ -723,37 +729,37 @@ class ClipMatcher(SetCriterion):
                          l_dict.items()})
                     
                     # Supervising detection queries from the transformer   
-                    if 'interm_outputs' in outputs:
-                        start = 0
-                    else:
-                        start = 1
-                    if i>=start:
-                        if self.dn != "no" and mask_dict is not None:
-                            out_=output_known_lbs_bboxes['aux_outputs'][i]
-                            l_dict = {}
-                            for loss in self.losses:
-                                l_dict.update(
-                                    self.get_loss(loss,
-                                                out_,
-                                                gt_instances=[gt_instances_i],
-                                                indices=exc_idx,
-                                                num_boxes=1 * scalar))
-                            l_dict = {k + f'_dn_{i}': v for k, v in l_dict.items()}
-                            self.losses_dict.update(
-                                {'frame_{}_aux{}_{}'.format(self._current_frame_idx, i, key): value for key, value in
-                                l_dict.items()})
-                        elif self.dn != "no":
-                            l_dict = dict()
-                            l_dict[f'loss_bbox_dn_{i}'] = torch.as_tensor(0.).to(pred_logits_i.device)
-                            l_dict[f'loss_giou_dn_{i}'] = torch.as_tensor(0.).to(pred_logits_i.device)
-                            l_dict[f'loss_ce_dn_{i}'] = torch.as_tensor(0.).to(pred_logits_i.device)
-                            if self.dn == "seg":
-                                l_dict[f'loss_mask_dn_{i}'] = torch.as_tensor(0.).to(pred_logits_i.device)
-                                l_dict[f'loss_dice_dn_{i}'] = torch.as_tensor(0.).to(pred_logits_i.device)
-                            # self.losses.update(l_dict)
-                            self.losses_dict.update(
-                                {'frame_{}_aux{}_{}'.format(self._current_frame_idx, i, key): value for key, value in
-                                l_dict.items()})
+                    # if 'interm_outputs' in outputs:
+                    #     start = 0
+                    # else:
+                    #     start = 1
+                    # if i>=start:
+                    #     if self.dn != "no" and mask_dict is not None:
+                    #         out_=output_known_lbs_bboxes['aux_outputs'][i]
+                    #         l_dict = {}
+                    #         for loss in self.losses:
+                    #             l_dict.update(
+                    #                 self.get_loss(loss,
+                    #                             out_,
+                    #                             gt_instances=[gt_instances_i],
+                    #                             indices=exc_idx,
+                    #                             num_boxes=1 * scalar))
+                    #         l_dict = {k + f'_dn_{i}': v for k, v in l_dict.items()}
+                    #         self.losses_dict.update(
+                    #             {'frame_{}_aux{}_{}'.format(self._current_frame_idx, i, key): value for key, value in
+                    #             l_dict.items()})
+                    #     elif self.dn != "no":
+                    #         l_dict = dict()
+                    #         l_dict[f'loss_bbox_dn_{i}'] = torch.as_tensor(0.).to(pred_logits_i.device)
+                    #         l_dict[f'loss_giou_dn_{i}'] = torch.as_tensor(0.).to(pred_logits_i.device)
+                    #         l_dict[f'loss_ce_dn_{i}'] = torch.as_tensor(0.).to(pred_logits_i.device)
+                    #         if self.dn == "seg":
+                    #             l_dict[f'loss_mask_dn_{i}'] = torch.as_tensor(0.).to(pred_logits_i.device)
+                    #             l_dict[f'loss_dice_dn_{i}'] = torch.as_tensor(0.).to(pred_logits_i.device)
+                    #         # self.losses.update(l_dict)
+                    #         self.losses_dict.update(
+                    #             {'frame_{}_aux{}_{}'.format(self._current_frame_idx, i, key): value for key, value in
+                    #             l_dict.items()})
                 
                 
         # Hungarian between GT and prediction indices in two-stage
@@ -775,11 +781,11 @@ class ClipMatcher(SetCriterion):
                                        num_boxes=1)
                 l_dict = {k + f'_interm': v for k, v in l_dict.items()}
                 self.losses_dict.update(
-                            {'frame_{}_aux{}_{}'.format(self._current_frame_idx, i, key): value for key, value in
-                            l_dict.items()})
+                    {'frame_{}_aux_{}'.format(self._current_frame_idx, key): value for key, value in
+                    l_dict.items()})
            
                
-        # Calculating reconstruction loss for reference_points
+        # # Calculating reconstruction loss for reference_points
         # if 'output_autoencoder' in outputs:
         #     output_autoencoder = outputs['output_autoencoder']
         #     reconstructed_points = {
@@ -799,22 +805,22 @@ class ClipMatcher(SetCriterion):
         #     for key, value in ae_loss_dict.items():
         #         self.losses_dict.update({'frame_{}_AE_{}'.format(self._current_frame_idx, key): value})
         
-        if 'output_autoencoder' in outputs:
-            output_autoencoder = outputs['output_autoencoder']
-            reconstructed_points = {
-                'pred_boxes' : output_autoencoder['reconstructed_ref_points'].sigmoid(),
-                'input' : output_autoencoder['original_ref_points'],
-            }
-            # original_points = outputs['output_autoencoder']['original_ref_points']
+        # if 'output_autoencoder' in outputs:
+        #     output_autoencoder = outputs['output_autoencoder']
+        #     reconstructed_points = {
+        #         'pred_boxes' : output_autoencoder['reconstructed_ref_points'].sigmoid(),
+        #         'input' : output_autoencoder['original_ref_points'],
+        #     }
+        #     # original_points = outputs['output_autoencoder']['original_ref_points']
             
-            # ae_matched_indices_layer = match_for_single_decoder_layer_AE(reconstructed_points, self.matcher)
+        #     # ae_matched_indices_layer = match_for_single_decoder_layer_AE(reconstructed_points, self.matcher)
 
-            # Calculate the autoencoder loss
-            ae_loss_dict = self.autoencoder_loss(reconstructed_points)
+        #     # Calculate the autoencoder loss
+        #     ae_loss_dict = self.autoencoder_loss(reconstructed_points)
 
-            # Update the losses dictionary with autoencoder loss for the current frame
-            for key, value in ae_loss_dict.items():
-                self.losses_dict.update({'frame_{}_AE_{}'.format(self._current_frame_idx, key): value})
+        #     # Update the losses dictionary with autoencoder loss for the current frame
+        #     for key, value in ae_loss_dict.items():
+        #         self.losses_dict.update({'frame_{}_AE_{}'.format(self._current_frame_idx, key): value})
             
         self._step()
         return track_instances
@@ -973,17 +979,17 @@ class MOTR(nn.Module):
 
         # if two-stage, the last class_embed and bbox_embed is for region proposal generation
         num_pred = (transformer.decoder.num_layers + 1) if two_stage else transformer.decoder.num_layers
-        if with_box_refine:
-            self.class_embed = _get_clones(self.class_embed, num_pred)
-            self.bbox_embed = _get_clones(self.bbox_embed, num_pred)
-            nn.init.constant_(self.bbox_embed[0].layers[-1].bias.data[2:], -2.0)
-            # hack implementation for iterative bounding box refinement
-            self.transformer.decoder.bbox_embed = self.bbox_embed
-        else:
-            nn.init.constant_(self.bbox_embed.layers[-1].bias.data[2:], -2.0)
-            self.class_embed = nn.ModuleList([self.class_embed for _ in range(num_pred)])
-            self.bbox_embed = nn.ModuleList([self.bbox_embed for _ in range(num_pred)])
-            self.transformer.decoder.bbox_embed = None
+        # if with_box_refine:
+        #     self.class_embed = _get_clones(self.class_embed, num_pred)
+        #     self.bbox_embed = _get_clones(self.bbox_embed, num_pred)
+        #     nn.init.constant_(self.bbox_embed[0].layers[-1].bias.data[2:], -2.0)
+        #     # hack implementation for iterative bounding box refinement
+        #     self.transformer.decoder.bbox_embed = self.bbox_embed
+        # else:
+        #     nn.init.constant_(self.bbox_embed.layers[-1].bias.data[2:], -2.0)
+        #     self.class_embed = nn.ModuleList([self.class_embed for _ in range(num_pred)])
+        #     self.bbox_embed = nn.ModuleList([self.bbox_embed for _ in range(num_pred)])
+        #     self.transformer.decoder.bbox_embed = None
         # if two_stage:
         #     # hack implementation for two-stage
         #     # self.transformer.decoder.class_embed = self.class_embed
@@ -1011,34 +1017,6 @@ class MOTR(nn.Module):
         self.memory_bank = memory_bank
         self.mem_bank_len = 0 if memory_bank is None else memory_bank.max_his_length
         
-    def pred_box(self, reference, hs, ref0=None):
-        """
-        :param reference: reference box coordinates from each decoder layer
-        :param hs: content
-        :param ref0: whether there are prediction from the first layer
-        """
-        device = reference[0].device
-        
-        if ref0 is None:
-            outputs_coord_list = []
-        else:
-            outputs_coord_list = [ref0.to(device)]
-        for dec_lid, (layer_ref_sig, layer_bbox_embed, layer_hs) in enumerate(zip(reference[:-1], self.transformer.bbox_embed, hs)):
-            assert not torch.isnan(layer_ref_sig).any(), "NaN values detected in layer_ref_sig in pred_box."
-            assert not torch.isnan(layer_hs).any(), "NaN values detected in layer_hs in pred_box."
-
-            layer_delta_unsig = layer_bbox_embed(layer_hs).to(device)
-            assert not torch.isnan(inverse_sigmoid(layer_ref_sig)).any(), "NaN values detected in inverse_sigmoid(layer_ref_sig) in pred_box."
-            layer_outputs_unsig = layer_delta_unsig + inverse_sigmoid(layer_ref_sig).to(device)
-            layer_outputs_unsig = layer_outputs_unsig.sigmoid()
-            assert not torch.isnan(layer_outputs_unsig).any(), "NaN values detected in layer_outputs_unsig in pred_box."
-            outputs_coord_list.append(layer_outputs_unsig)
-        outputs_coord_list = torch.stack(outputs_coord_list)
-        assert not torch.isnan(outputs_coord_list).any(), "NaN values detected in outputs_coord_list in pred_box."
-        return outputs_coord_list
-        
-        
-        
     def _generate_empty_tracks(self, frame_shape, device):
         track_instances = Instances((1, 1))
         
@@ -1051,7 +1029,7 @@ class MOTR(nn.Module):
         # track_instances.ref_pts = self.transformer.reference_points(self.query_embed.weight[:, :dim // 2])
         # track_instances.query_pos = self.query_embed.weight
         track_instances.query_pos = self.transformer.init_det.weight
-        track_instances.ref_pts = self.transformer.reference_points(self.transformer.init_det.weight[:, :dim // 2])
+        # track_instances.ref_pts = self.transformer.reference_points(self.transformer.init_det.weight[:, :dim // 2])
         track_instances.output_embedding = torch.zeros((num_queries, dim >> 1), device=device) # It should be updated based on the num_queries (track+detect)
         track_instances.obj_idxes = torch.full((len(track_instances),), -1, dtype=torch.long, device=device)
         track_instances.matched_gt_idxes = torch.full((len(track_instances),), -1, dtype=torch.long, device=device)
@@ -1084,7 +1062,7 @@ class MOTR(nn.Module):
     #     return [{'pred_logits': a, 'pred_boxes': b}
     #             for a, b in zip(outputs_class[:-1], outputs_coord[:-1])]
     
-    def _set_aux_loss(self, outputs_class, outputs_seg_masks, out_boxes=None):
+    def _set_aux_loss(self, outputs_class, outputs_seg_masks, out_boxes):
         # this is a workaround to make torchscript happy, as torchscript
         # doesn't support dictionary with non-homogeneous values, such
         # as a dict having both a Tensor and a list.
@@ -1099,8 +1077,60 @@ class MOTR(nn.Module):
                 {"pred_logits": a, "pred_masks": b, "pred_boxes":c}
                 for a, b, c in zip(outputs_class[:-1], outputs_seg_masks[:-1], out_boxes[:-1])
             ]
+            
+    
+    def pred_box(self, reference, hs, ref0=None):
+        """
+        :param reference: reference box coordinates from each decoder layer
+        :param hs: content
+        :param ref0: whether there are prediction from the first layer
+        """
+        device = reference[0].device
+        
+        if ref0 is None:
+            outputs_coord_list = []
+        else:
+            outputs_coord_list = [ref0.to(device)]
+        # output_dir_motr_layer_delta_unsig_ref = f"/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR_mask_DN_DAB/outputs/delta_unsig_ref0.txt"
+        # with open(output_dir_motr_layer_delta_unsig_ref, 'w') as f:
+        #     f.write(str(ref0))
+        for dec_lid, (layer_ref_sig, layer_bbox_embed, layer_hs) in enumerate(zip(reference[:-1], self.transformer.bbox_embed, hs)):
+            assert not torch.isnan(layer_ref_sig).any(), "NaN values detected in layer_ref_sig in pred_box."
+            assert not torch.isnan(layer_hs).any(), "NaN values detected in layer_hs in pred_box."
 
-    def _forward_single_image(self, samples, targets, track_instances: Instances):
+            layer_delta_unsig = layer_bbox_embed(layer_hs).to(device)
+            assert not torch.isnan(layer_delta_unsig).any(), "NaN values detected in layer_delta_unsig in pred_box."
+    
+            # Saving delta_unsig for each layer
+            # output_dir_motr_layer_delta_unsig = f"/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR_mask_DN_DAB/outputs/layer_{dec_lid}_delta_unsig.txt"
+            # with open(output_dir_motr_layer_delta_unsig, 'w') as f:
+            #     f.write(str(layer_delta_unsig))
+                
+            # layer_outputs_unsig = layer_delta_unsig + layer_ref_sig.to(device)
+            layer_outputs_unsig = layer_delta_unsig + inverse_sigmoid(layer_ref_sig).to(device)
+            assert not torch.isnan(layer_outputs_unsig).any(), "NaN values detected in layer_outputs_unsig in pred_box."
+            
+            # Saving unsigmoided output before applying sigmoid, for each layer
+            # output_dir_motr_layer_outputs_unsig = f"/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR_mask_DN_DAB/outputs/layer_{dec_lid}_outputs_unsig.txt"
+            # with open(output_dir_motr_layer_outputs_unsig, 'w') as f:
+            #     f.write(str(layer_outputs_unsig))
+                
+            layer_outputs_unsig = layer_outputs_unsig.sigmoid()
+            assert not torch.isnan(layer_outputs_unsig).any(), "NaN values detected in layer_outputs_unsig in pred_box."
+            
+            # Saving sigmoided output, for each layer
+            # output_dir_motr_layer_outputs_unsig_sec = f"/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR_mask_DN_DAB/outputs/layer_{dec_lid}_outputs_unsig_sec.txt"
+            # with open(output_dir_motr_layer_outputs_unsig_sec, 'w') as f:
+            #     f.write(str(layer_outputs_unsig))
+            
+            outputs_coord_list.append(layer_outputs_unsig)
+            
+        outputs_coord_list = torch.stack(outputs_coord_list)
+        # assert not torch.isnan(outputs_coord_list).any(), "NaN values detected in outputs_coord_list in pred_box."
+        return outputs_coord_list
+        
+
+    def _forward_single_image(self, samples, targets, track_instances: Instances, frame_index):
         
         def plot_out_boxes_on_samples(samples, out_boxes, output_directory):
             """
@@ -1204,9 +1234,15 @@ class MOTR(nn.Module):
 
         # hs, init_reference, inter_references, mask_dict, predictions_class, predictions_mask, interm_outputs = self.transformer(srcs, masks, pos, embeddings, attention_embedding,  targets, track_instances.query_pos, ref_pts=None)
         # hs, init_reference, inter_references, mask_dict, interm_outputs, output_autoencoder = self.transformer(srcs, masks, pos, embeddings, attention_embedding,  targets, track_instances.query_pos, ref_pts=None)
-        hs, init_reference, inter_references, mask_dict, interm_outputs = self.transformer(srcs, masks, pos, embeddings, attention_embedding,  targets, track_instances.query_pos, ref_pts=track_instances.ref_pts)
-        predictions_class = []
-        predictions_mask = []
+        # hs, init_reference, inter_references, mask_dict, interm_outputs = self.transformer(srcs, masks, pos, embeddings, attention_embedding,  targets, track_instances.query_pos, ref_pts=track_instances.ref_pts)
+        # print('track_instances.query_pos:', track_instances.query_pos)
+        if frame_index == 0:
+            hs, init_reference, inter_references, mask_dict, predictions_class, predictions_mask, interm_outputs = self.transformer(srcs, masks, pos, embeddings, attention_embedding, frame_index, targets, track_instances.query_pos)
+        else:
+            hs, init_reference, inter_references, mask_dict, predictions_class, predictions_mask = self.transformer(srcs, masks, pos, embeddings, attention_embedding, frame_index,  targets, track_instances.query_pos)
+           
+        # predictions_class = []
+        # predictions_mask = []
         for i, output in enumerate(hs):
             outputs_class, outputs_mask = self.forward_prediction_heads(output.transpose(0, 1), attention_embedding, embeddings, self.training or (i == len(hs)-1))
             predictions_class.append(outputs_class)
@@ -1216,54 +1252,59 @@ class MOTR(nn.Module):
         if self.initial_pred:
             out_boxes = self.pred_box(inter_references, hs, init_reference.sigmoid())
             assert not torch.isnan(out_boxes).any(), "NaN values detected in out_boxes in initial_pred if."
-            # assert len(predictions_class) == self.num_decoder_layers + 1
         else:
             out_boxes = self.pred_box(inter_references, hs)
             assert not torch.isnan(out_boxes).any(), "NaN values detected in out_boxes in initial_pred else."
-        
-        
+            
+            
         hs  = torch.cat(hs, dim=0).unsqueeze(1)
         inter_references = torch.cat(inter_references, dim=0).unsqueeze(1)
         
-        for lvl in range(hs.shape[0]):
-            if lvl == 0:
-                reference = init_reference
-            else:
-                reference = inter_references[lvl - 1]
-            reference = inverse_sigmoid(reference)
-            tmp = self.transformer.bbox_embed[lvl](hs[lvl])
-            if reference.shape[-1] == 4:
-                tmp += reference
-            else:
-                assert reference.shape[-1] == 2
-                tmp[..., :2] += reference
+        # for lvl in range(hs.shape[0]):
+        #     if lvl == 0:
+        #         reference = init_reference
+        #     else:
+        #         reference = inter_references[lvl - 1]
+        #     reference = inverse_sigmoid(reference)
+        #     tmp = self.transformer.bbox_embed[lvl](hs[lvl])
+        #     if reference.shape[-1] == 4:
+        #         tmp += reference
+        #     else:
+        #         assert reference.shape[-1] == 2
+        #         tmp[..., :2] += reference
             
         ref_pts_all = torch.cat([init_reference[None][:, :, :, -2:], inter_references[:, :, :, :2]], dim=0)
-        # print('ref_pts_all before:',ref_pts_all.shape)
-        if mask_dict is not None:
-            predictions_mask=torch.stack(predictions_mask)
-            predictions_class=torch.stack(predictions_class)
-            predictions_class, out_boxes,predictions_mask, ref_pts_all=\
-                self.dn_post_process(predictions_class,out_boxes,mask_dict,predictions_mask, ref_pts_all)
-            # print('ref_pts_all:',ref_pts_all.shape)
-            predictions_class,predictions_mask=list(predictions_class),list(predictions_mask)
+        
+        # if mask_dict is not None:
+        #     predictions_mask=torch.stack(predictions_mask)
+        #     predictions_class=torch.stack(predictions_class)
+        #     predictions_class, out_boxes,predictions_mask, ref_pts_all=\
+        #         self.dn_post_process(predictions_class,out_boxes,mask_dict,predictions_mask, ref_pts_all)
+        #     # print('ref_pts_all:',ref_pts_all.shape)
+        #     predictions_class,predictions_mask=list(predictions_class),list(predictions_mask)
             
         predictions_class[-1] = predictions_class[-1] + 0.0*self.transformer.label_enc.weight.sum()
         assert not torch.isnan(out_boxes[-1]).any(), "NaN values detected in out_boxes[-1]."
         # plot_out_boxes_on_samples(samples, out_boxes[-1], '/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR_mask_DN_DAB/output/out_boxes_AE')
+        # output_dir_motr_out_boxes = "/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR_mask_DN_DAB/outputs/motr_out_boxes[-1].txt"
+        # with open (output_dir_motr_out_boxes, 'w') as f:
+        #     f.write (str(out_boxes[-1]))
+            
         out = {
             'pred_logits': predictions_class[-1],
-            # 'pred_masks': predictions_mask[-1].sigmoid(),
             'pred_masks': predictions_mask[-1],
-            'pred_boxes':out_boxes[-1],
-            'aux_outputs': self._set_aux_loss(
-                predictions_class , predictions_mask, out_boxes
-            )
+            'pred_boxes':out_boxes[-1]
         }
-        out['ref_pts'] =  ref_pts_all[5]
-        out['interm_outputs'] = interm_outputs # query selection from encoder
-        # out['output_autoencoder'] = output_autoencoder # Reconstructing 4D boxes from higher dimension
         
+        out['ref_pts'] =  ref_pts_all[5]
+        
+        if self.aux_loss:
+            out['aux_outputs'] = self._set_aux_loss(predictions_class , predictions_mask, out_boxes)
+
+        if frame_index == 0:
+            out['interm_outputs'] = interm_outputs # query selection from encoder
+        # out['output_autoencoder'] = output_autoencoder # Reconstructing 4D boxes from higher dimension
+        out['hs'] = hs[-1]
         return out, mask_dict
     
     
@@ -1286,7 +1327,7 @@ class MOTR(nn.Module):
         track_instances.scores = track_scores
         track_instances.pred_logits = frame_res['pred_logits'][0]
         track_instances.pred_boxes = frame_res['pred_boxes'][0]
-        assert not torch.isnan(track_instances.pred_boxes).any(), "NaN found in track_instances.pred_boxes in MOTR"
+        # assert not torch.isnan(track_instances.pred_boxes).any(), "NaN found in track_instances.pred_boxes in MOTR"
 
         
         # (10) Adding pred_masks
@@ -1340,22 +1381,37 @@ class MOTR(nn.Module):
         if not isinstance(img, NestedTensor):
             img = nested_tensor_from_tensor_list(img)
         if track_instances is None:
-            track_instances = self._generate_empty_tracks(ori_img_size)
-        res = self._forward_single_image(img,
-                                         track_instances=track_instances)
-        res = self._post_process_single_image(res, track_instances, ori_img_size, False)
+            track_instances = self._generate_empty_tracks(ori_img_size, 'cuda:0')
+        res, mask_dict = self._forward_single_image(img,
+                                        track_instances=track_instances)
+        
+        res = self._post_process_single_image(res, track_instances, ori_img_size, mask_dict,False)
+        
 
         track_instances = res['track_instances']
+        
+        # num_masks = track_instances.pred_masks.shape[0]
+        # num_cols = 5  # Number of columns in subplot grid
+        # num_rows = (num_masks + num_cols - 1) // num_cols  # Calculate rows needed
+
+        # fig, axs = plt.subplots(num_rows, num_cols, figsize=(15, num_rows * 3))
+        # axs = axs.flatten()  # Flatten to make indexing easier
+
+        # for i in range(num_masks):
+        #     ax = axs[i]
+        #     mask = track_instances.pred_masks[i].cpu().numpy()
+        #     print(mask.shape)
+        #     ax.imshow(mask, cmap='gray')
+        #     ax.axis('off')
+        #     ax.set_title(f'Index: {i}')
+
+        # # Turn off axes for any unused subplots
+        # for j in range(i + 1, len(axs)):
+        #     axs[j].axis('off')
+
+        # plt.tight_layout()
+        # plt.show()
         track_instances = self.post_process(track_instances, ori_img_size)
-        
-        # Apply sigmoid to convert mask logits to probabilities
-        # if hasattr(track_instances, 'pred_masks'):
-        #     mask_threshold = 0.5
-        #     mask_probs = track_instances.pred_masks.sigmoid()
-            
-        #     # Apply threshold to convert probabilities to binary masks
-        #     track_instances.pred_masks = (mask_probs > mask_threshold).float()
-        
         
         ret = {'track_instances': track_instances}
         if 'ref_pts' in res:
@@ -1388,6 +1444,7 @@ class MOTR(nn.Module):
         track_instances = self._generate_empty_tracks(frames_shape, device)
         keys = list(track_instances._fields.keys())
         for frame_index, (frame, target) in enumerate(zip(frames, targets)):
+            # print('frame_index:', frame_index)
             # print(frame.shape) # torch.Size([3, 768, 1024])
             frame_shape = (frame.shape[1], frame.shape[2])
             frame.requires_grad = False
@@ -1426,7 +1483,7 @@ class MOTR(nn.Module):
                 }
             else:
                 frame = nested_tensor_from_tensor_list([frame])
-                frame_res, mask_dict = self._forward_single_image(frame, target, track_instances)
+                frame_res, mask_dict = self._forward_single_image(frame, target, track_instances, frame_index)
             # assert track_instances.scores.shape[0] == 300, "track_instances.scores in Forward must have exactly 300 elements, but got {}".format(track_instances.scores.shape[0])
             frame_res = self._post_process_single_image(frame_res, track_instances, frame_shape, mask_dict,is_last)
             # print('frame_res:', frame_res)
@@ -1517,7 +1574,7 @@ def build(args):
     # Weights for auxiliary and intermediate output losses
     if args.aux_loss:
         for i in range(num_frames_per_batch):
-            for j in range(args.dec_layers-1):
+            for j in range(args.dec_layers):
                 weight_dict.update({'frame_{}_aux{}_loss_ce'.format(i, j): args.cls_loss_coef,
                                     'frame_{}_aux{}_loss_bbox'.format(i, j): args.bbox_loss_coef,
                                     'frame_{}_aux{}_loss_giou'.format(i, j): args.giou_loss_coef,
@@ -1549,13 +1606,13 @@ def build(args):
     for i in range(num_frames_per_batch):     
         # Intermediate output losses (if applicable)
         weight_dict.update({
-            'frame_{}_interm_loss_ce'.format(i): args.cls_loss_coef,
-            'frame_{}_interm_loss_bbox'.format(i): args.bbox_loss_coef,
-            'frame_{}_interm_loss_giou'.format(i): args.giou_loss_coef,
+            'frame_{}_aux_loss_ce_interm'.format(i): args.cls_loss_coef,
+            'frame_{}_aux_loss_bbox_interm'.format(i): args.bbox_loss_coef,
+            'frame_{}_aux_loss_giou_interm'.format(i): args.giou_loss_coef,
             
             # (21) Adding masks weight
-            'frame_{}_interm_loss_mask'.format(i): args.mask_loss_coef,
-            'frame_{}_interm_loss_dice'.format(i): args.dice_loss_coef,
+            'frame_{}_aux_loss_mask_interm'.format(i): args.mask_loss_coef,
+            'frame_{}_aux_loss_dice_interm'.format(i): args.dice_loss_coef,
             
             })
         

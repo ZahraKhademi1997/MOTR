@@ -660,16 +660,54 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
 
 
-#########################################################################################################################
+
 # () Training whole part of the model
 def train_one_epoch_mot(model: torch.nn.Module, criterion: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
                     device: torch.device, epoch: int, max_norm: float = 0):
-    # print("Entered train_one_epoch_mot in engine")
+    
+    
+    def forward_hook(module, input, output):
+        if torch.isnan(output).any() or torch.isinf(output).any():
+            print(f"Warning: NaN or Inf detected in forward hook output of {module.__class__.__name__}")
+    
+    
+    def log_parameters_stats(module, module_name):
+        for name, param in module.named_parameters():
+            if param.requires_grad:
+                # print(f"Stats for {module_name}.{name}: Mean = {param.data.mean()}, Std = {param.data.std()}, Min = {param.data.min()}, Max = {param.data.max()}")
+                if torch.isnan(param.data).any() or torch.isinf(param.data).any():
+                    print(f"Warning: NaN or Inf found in {module_name}.{name}")
+    
+    def backward_hook(layer_id):
+        def hook(module, grad_input, grad_output):
+            for i, grad in enumerate(grad_output):  # grad_output contains the gradients with respect to the output
+                if grad is not None:
+                    # Calculate gradient norm for logging or other checks (optional)
+                    grad_norm = grad.data.norm(2).item() if grad.is_cuda else grad.norm(2).item()
+                    # print(f"Layer {layer_id} - Grad Output {i}: Norm = {grad_norm}")
+
+                    # Raise an assertion error if NaN values are found
+                    assert not torch.isnan(grad).any(), f"NaN detected in gradient of layer {layer_id} output {i}"
+
+                    # Raise an assertion error if Inf values are found
+                    assert not torch.isinf(grad).any(), f"Inf detected in gradient of layer {layer_id} output {i}"
+
+        return hook
+    
+    # def backward_hook(module, grad_input, grad_output):
+    #     for i, grad in enumerate(grad_input):
+    #         if grad is not None:
+    #             assert not torch.isnan(grad).any(), f"NaN found in grad_input {i} of {module.__class__.__name__}"
+    #             assert not torch.isinf(grad).any(), f"Inf found in grad_input {i} of {module.__class__.__name__}"
+
+    #     for i, grad in enumerate(grad_output):
+    #         if grad is not None:
+    #             assert not torch.isnan(grad).any(), f"NaN found in grad_output {i} of {module.__class__.__name__}"
+    #             assert not torch.isinf(grad).any(), f"Inf found in grad_output {i} of {module.__class__.__name__}"              
+    torch.autograd.set_detect_anomaly(True) 
     model.train()
-    # print('model.train in engine')
     criterion.train()
-    # print('criterion.train in engine')
     metric_logger = utils.MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
     # metric_logger.add_meter('class_error', utils.SmoothedValue(window_size=1, fmt='{value:.2f}'))
@@ -680,9 +718,9 @@ def train_one_epoch_mot(model: torch.nn.Module, criterion: torch.nn.Module,
     # Dictionary to accumulate loss values for each key over iterations
     loss_accumulator = {key: 0.0 for key in criterion.weight_dict.keys()}
     
-    #####################################################################
+   
     # () Defining function to log gradient of different part of the model 
-    writer_grad = SummaryWriter('/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR_mask_DN_DAB/outputs/logs/logs_grad') 
+    writer_grad = SummaryWriter('/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR_mask_DN_DAB/outputs/logs_alpha-1/logs_grad') 
     def log_gradients(model, writer_grad, epoch, iteration):
         # Check if the model is wrapped in DistributedDataParallel
         if isinstance(model, torch.nn.parallel.DistributedDataParallel):
@@ -695,8 +733,11 @@ def train_one_epoch_mot(model: torch.nn.Module, criterion: torch.nn.Module,
             'input_proj': model.input_proj,
             'PerPixelEmbedding' : model.PerPixelEmbedding,
             'track_embed' : model.track_embed,
-            'transformer box_embed' : model.transformer.bbox_embed,
-            'class_embed' : model.transformer.class_embed,
+            'transformer box_embed' : model.transformer._bbox_embed,
+            'transformer decoder box_embed' : model.transformer.decoder.bbox_embed,
+            'class_embed motr' : model.class_embed,
+            'class_embed transformer' : model.transformer.class_embed,
+            'class_embed decoder transformer' : model.transformer.decoder.class_embed,
             'mask_embed' : model.transformer.mask_embed,
             'label_enc' : model.transformer.label_enc,
             'box_embed' : model.bbox_embed,
@@ -734,28 +775,17 @@ def train_one_epoch_mot(model: torch.nn.Module, criterion: torch.nn.Module,
                 if param.grad is not None:
                     total_grad_norm += param.grad.data.norm(2).item()
             writer_grad.add_scalar(f'grad_norm/{name}', total_grad_norm, epoch * len(data_loader) + iteration)
-
+            
+            
+    for layer in model.module.transformer.decoder.bbox_embed.modules():
+        layer.register_forward_hook(forward_hook)
+        # layer.register_backward_hook(backward_hook)
+    for idx, layer in enumerate(model.module.transformer.decoder.bbox_embed.modules()):
+        if hasattr(layer, 'weight'):
+            layer.register_backward_hook(backward_hook(idx))
+        
+        
     iteration = 0
-    #####################################################################
-    # def forward_hook(module, input, output):
-    #     # Log the output of each layer (or selected layers) during the forward pass
-    #     writer.add_histogram(f'{module.__class__.__name__}_output', output, epoch)
-    
-    # last_layer = None
-
-    # # Iterate through all modules to find the last one
-    # for module in model.modules():
-    #     last_layer = module
-
-    # # Check if the last layer is found
-    # if last_layer is not None:
-    #     # Attach the forward hook to the last layer
-    #     last_layer.register_forward_hook(forward_hook)
-    #     print(f"Hook attached to the last layer: {last_layer.__class__.__name__}")
-    # else:
-    #     print("No layer found in the model")
-        
-        
             
     # for samples, targets in metric_logger.log_every(data_loader, print_freq, header):
     for data_dict in metric_logger.log_every(data_loader, print_freq, header):
@@ -768,10 +798,6 @@ def train_one_epoch_mot(model: torch.nn.Module, criterion: torch.nn.Module,
         for key, value in loss_dict.items():
             value.requires_grad_(True)
             
-        # print('data_dict is:', data_dict)
-        # print('outputs are:', outputs)
-        # print('loss_dict is:', loss_dict)
-        # print('weight_dict is:', weight_dict)
         losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
         losses.requires_grad_(True) 
         
@@ -793,76 +819,19 @@ def train_one_epoch_mot(model: torch.nn.Module, criterion: torch.nn.Module,
             print(loss_dict_reduced)
             sys.exit(1)
 
-        #####################################################################################
-        # Store initial weights and biases
-        # initial_k_linear_weights = model.module.bbox_attention.k_linear.weight.clone().detach()
-        # initial_k_linear_bias = model.module.bbox_attention.k_linear.bias.clone().detach()
-        # initial_q_linear_weights = model.module.bbox_attention.q_linear.weight.clone().detach()
-        # initial_q_linear_bias = model.module.bbox_attention.q_linear.bias.clone().detach()
-        #####################################################################################
-        
         optimizer.zero_grad()
         
-        # grads = {}
-        # def save_grad(name):
-        #     def hook(grad):
-        #         grads[name] = grad
-        #     return hook
-
-        # for name, param in model.named_parameters():
-        #     if param.requires_grad:
-        #         param.register_hook(save_grad(name)) 
         
         losses.backward()
-        # with profiler.profile(profile_memory=True, use_cuda=True) as prof:
-        #     losses.backward()
-        # profiling_results = prof.key_averages().table(sort_by="self_cpu_time_total")
-        # output_dir="/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR-main-AppleMots/outputs/gradients.txt"
-        # with open (output_dir, 'w') as f:
-        #     f.write(profiling_results) 
-            
         
-        ########################################################################
-        # () Logging gradients
         log_gradients(model, writer_grad, epoch, iteration)
-        ########################################################################
-        
-        ################################################### 
-        # ()
-        # for name, param in model.named_parameters():
-        #     if param.requires_grad and param.grad is not None:
-        #         print(f"Gradient for {name}: {param.grad.norm().item()}")  # Print the norm of the gradients
-        #     else:
-        #         print(f"No gradient or not trainable for {name}")
-        
-        # for name, grad in grads.items():
-        #     if grad is not None:
-        #         plt.hist(grad.cpu().numpy().flatten(), bins=100)
-        #         plt.title(f'Gradient histogram for {name}')
-        #         plt.xlabel('Gradient values')
-        #         plt.ylabel('Frequency')
-        #         plt.savefig(f'/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR-main-AppleMots/outputs/gradients/gradient_histogram_{name}.png')
-        #         plt.close()
-        ################################################### 
         
         if max_norm > 0:
+            # print('max_norm:', max_norm)
             grad_total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
         else:
             grad_total_norm = utils.get_total_grad_norm(model.parameters(), max_norm)
         optimizer.step()
-        
-        ####################################################################################################################
-        # Check if weights and biases have changed
-        # k_linear_weights_changed = not torch.equal(initial_k_linear_weights, model.module.bbox_attention.k_linear.weight)
-        # k_linear_bias_changed = not torch.equal(initial_k_linear_bias, model.module.bbox_attention.k_linear.bias)
-        # q_linear_weights_changed = not torch.equal(initial_q_linear_weights, model.module.bbox_attention.q_linear.weight)
-        # q_linear_bias_changed = not torch.equal(initial_q_linear_bias, model.module.bbox_attention.q_linear.bias)
-
-        # print(f"k_linear weights changed: {k_linear_weights_changed}")
-        # print(f"k_linear bias changed: {k_linear_bias_changed}")
-        # print(f"q_linear weights changed: {q_linear_weights_changed}")
-        # print(f"q_linear bias changed: {q_linear_bias_changed}")
-        ####################################################################################################################
 
         for key, value in loss_dict.items():
             loss_accumulator[key] += value.item()
@@ -873,12 +842,15 @@ def train_one_epoch_mot(model: torch.nn.Module, criterion: torch.nn.Module,
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
         metric_logger.update(grad_norm=grad_total_norm)
         # gather the stats from all processes
+        # log_parameters_stats(model.module.transformer.decoder.bbox_embed, "bbox_embed")
         iteration+=1
+        
+    
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
     writer_grad.close()
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
-#########################################################################################################################
+
 
 
 @torch.no_grad()
