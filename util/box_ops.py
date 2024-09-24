@@ -56,10 +56,38 @@ def generalized_box_iou(boxes1, boxes2):
     Returns a [N, M] pairwise matrix, where N = len(boxes1)
     and M = len(boxes2)
     """
-    # degenerate boxes gives inf / nan results
-    # so do an early check
+    # output_dir_boxes1 = "/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR_mask_DN_DAB/outputs/boxes1.txt"
+    # with open (output_dir_boxes1, 'w') as f:
+    #     f.write (str(boxes1))
+        
+    # output_dir_boxes2 = "/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR_mask_DN_DAB/outputs/boxes2.txt"
+    # with open (output_dir_boxes2, 'w') as f:
+    #     f.write (str(boxes2))
+        
+    # boxes1 = torch.clamp(boxes1, 0, 1)
+    # output_dir_boxes1_after = "/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR_mask_DN_DAB/outputs/boxes1_after.txt"
+    # with open (output_dir_boxes1_after, 'w') as f:
+    #     f.write (str(boxes1))
+        
+    # Ensure boxes are valid
+    valid = (boxes1[:, 2:] >= boxes1[:, :2]).all(dim=1)
+    if not valid.all():
+        invalid_boxes = boxes1[~valid]
+        print("Invalid boxes:", invalid_boxes)
+        raise ValueError(f"Boxes are not valid. Ensure that x1 < x2 and y1 < y2. Found invalid boxes: {invalid_boxes}")
+    
     assert (boxes1[:, 2:] >= boxes1[:, :2]).all()
     assert (boxes2[:, 2:] >= boxes2[:, :2]).all()
+    
+    # if torch.isnan(boxes1).any() or torch.isnan(boxes2).any():
+    #     raise ValueError("Input boxes contain NaN values.")
+
+    # Check that boxes are valid (x1 < x2 and y1 < y2)
+    # if not (boxes1[:, 2:] > boxes1[:, :2]).all() or not (boxes2[:, 2:] > boxes2[:, :2]).all():
+    #     raise ValueError("Boxes are not valid. Ensure that x1 < x2 and y1 < y2.")
+
+
+
     iou, union = box_iou(boxes1, boxes2)
 
     lt = torch.min(boxes1[:, None, :2], boxes2[:, :2])
@@ -83,8 +111,8 @@ def masks_to_boxes(masks):
 
     h, w = masks.shape[-2:]
 
-    y = torch.arange(0, h, dtype=torch.float)
-    x = torch.arange(0, w, dtype=torch.float)
+    y = torch.arange(0, h, dtype=torch.float).to (masks.device)
+    x = torch.arange(0, w, dtype=torch.float).to (masks.device)
     y, x = torch.meshgrid(y, x)
 
     x_mask = (masks * x.unsqueeze(0))
@@ -96,3 +124,26 @@ def masks_to_boxes(masks):
     y_min = y_mask.masked_fill(~(masks.bool()), 1e8).flatten(1).min(-1)[0]
 
     return torch.stack([x_min, y_min, x_max, y_max], 1)
+
+
+def infer_bbox_format(bboxes):
+    # Assuming bboxes is of shape [1, N, 4] where N is the number of boxes
+    bbox_sample = bboxes[0]  # Take the first batch
+
+    # Checking if the third value is generally greater than the first (similarly for fourth vs second)
+    if (bbox_sample[:, 2] > bbox_sample[:, 0]).all() and (bbox_sample[:, 3] > bbox_sample[:, 1]).all():
+        return "xyxy"
+    else:
+        return "xywh"
+    
+def normalize_boxes(bboxes, img_width, img_height):
+    # Assuming bboxes is of shape [1, N, 4] and represents [cx, cy, w, h]
+    # Normalize cx and w by img_width
+    bboxes[:, :, 0] /= img_width
+    bboxes[:, :, 2] /= img_width
+
+    # Normalize cy and h by img_height
+    bboxes[:, :, 1] /= img_height
+    bboxes[:, :, 3] /= img_height
+    bboxes = bboxes.clamp(0, 1)
+    return bboxes
