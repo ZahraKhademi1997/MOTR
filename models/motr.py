@@ -758,7 +758,7 @@ class TrackerPostProcess(nn.Module):
         boxes = boxes * scale_fct[None, :]
         
         # (19) Adding out_masks
-        # masks = out_mask.squeeze(0)
+        masks = out_mask.squeeze(0)
         masks = torch.nn.functional.interpolate(out_mask.unsqueeze(0), size=target_size, mode='bilinear').squeeze(0)
         track_instances.masks = masks
 
@@ -916,6 +916,7 @@ class MOTR(nn.Module):
         track_instances.track_scores = torch.zeros((len(track_instances),), dtype=torch.float, device=device)
         track_instances.pred_boxes = torch.zeros((len(track_instances), 4), dtype=torch.float, device=device)
         track_instances.pred_logits = torch.zeros((len(track_instances), self.num_classes), dtype=torch.float, device=device)
+        track_instances.pred_masks = torch.zeros((len(track_instances), frame_shape[0], frame_shape[1]), dtype=torch.float, device=device)
 
         mem_bank_len = self.mem_bank_len
         track_instances.mem_bank = torch.zeros((len(track_instances), mem_bank_len, dim), dtype=torch.float32, device=device)
@@ -1063,7 +1064,12 @@ class MOTR(nn.Module):
             pred_masks = torch.stack(all_layer_masks, dim=0)  # Shape: [num_layers, num_imgs, num_queries, H, W]
     
         # print('pred_masks:', pred_masks[-1].shape, 'outputs_class:', outputs_class.shape, 'outputs_coord:', outputs_coord.shape)   
-        out = {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1], 'ref_pts': ref_pts_all[5], 'pred_masks': pred_masks[-1]}
+        out = {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1], 'ref_pts': ref_pts_all[5], 'pred_masks': F.interpolate(
+                pred_masks[-1],
+                size=(samples.tensors.shape[2], samples.tensors.shape[3]),
+                mode="bilinear",
+                align_corners=False,
+            )}
         
         if self.aux_loss:
             out['aux_outputs'] = self._set_aux_loss(outputs_class, pred_masks, outputs_coord)
@@ -1086,6 +1092,7 @@ class MOTR(nn.Module):
         track_instances.pred_logits = frame_res['pred_logits'][0]
         track_instances.pred_boxes = frame_res['pred_boxes'][0]
         track_instances.pred_masks = frame_res['pred_masks'][0]
+        print('track_instances.pred_masks:', track_instances.pred_masks.shape)
         track_instances.output_embedding = frame_res['hs'][0]
 
         if self.training:
@@ -1102,7 +1109,7 @@ class MOTR(nn.Module):
                 self.criterion.calc_loss_for_track_scores(track_instances)
                 
         tmp = {}
-        # tmp['init_track_instances'] = self._generate_empty_tracks(((pred_masks.shape[1], pred_masks.shape[2])), frame_res['pred_masks'].device)
+        # tmp['init_track_instances'] = self._generate_empty_tracks(((track_instances.pred_masks.shape[1], track_instances.pred_masks.shape[2])), frame_res['pred_masks'].device)
         tmp['track_instances'] = track_instances
         if not is_last:
             out_track_instances = self.track_embed(tmp)
@@ -1167,6 +1174,7 @@ class MOTR(nn.Module):
             if track_instances is None:
                 track_instances = self._generate_empty_tracks(frame_shape, device)
             else:
+                print('frame_shape:', frame_shape, 'track_instances:', track_instances.pred_masks.shape, 'generated:', self._generate_empty_tracks(frame_shape, device).pred_masks.shape)
                 track_instances = Instances.cat([
                     self._generate_empty_tracks(frame_shape, device),
                     track_instances])
