@@ -127,8 +127,10 @@ class DeformableTransformer(nn.Module):
         
         # Adding track queries
         # self.init_det = nn.Embedding(two_stage_num_proposals, d_model*2)
-        self.content_det = None
-        self.pos_det = None
+        # self.content_det = None
+        # self.pos_det = None
+        self.content_det = nn.Embedding(two_stage_num_proposals, d_model)
+        self.pos_det = nn.Embedding(two_stage_num_proposals, 4)
         
         self.level_embed = nn.Parameter(torch.Tensor(num_feature_levels, d_model))
         self.label_enc=nn.Embedding(num_classes,d_model)
@@ -451,20 +453,26 @@ class DeformableTransformer(nn.Module):
             
             pos_det = reference_points_undetach.detach() # xywh format
             content_det = tgt_undetach.detach() # preventing gradient flow from decoder to encoder 
+            # pos_det = reference_points_undetach # xywh format
+            # content_det = tgt_undetach # preventing gradient flow from decoder to encoder 
            
             # Supervising the predicted masks, boxes, and labels with GT in the criterion by calculating loss to serve as initialize queries.
             interm_outputs=dict()
             interm_outputs['pred_logits'] = outputs_class
             interm_outputs['pred_masks'] = outputs_mask
             interm_outputs['pred_boxes'] = reference_points_undetach.sigmoid()
-            
-            self.content_det = content_det.squeeze(0)
-            self.pos_det = pos_det.squeeze(0)
         
-        if query_embed.eq(0).all():
-            tgt = content_det
-            reference_points = pos_det
-        else: 
+        # if query_embed.eq(0).all():
+        # if self.content_det is None and self.pos_det is None:
+        #     print('content_det and pos_det are None')
+        #     tgt = content_det
+        #     reference_points = pos_det
+
+        # self.content_det = content_det.squeeze(0)
+        # self.pos_det = pos_det.squeeze(0)
+        self.content_det.weight = nn.Parameter(content_det.squeeze(0))
+        self.pos_det.weight = nn.Parameter(pos_det.squeeze(0))
+        if self.content_det is not None and self.pos_det is not None: 
             tgt = query_embed.unsqueeze(0).expand(bs, -1, -1)
             reference_points = ref_pts.unsqueeze(0).expand(bs, -1, -1)
         init_reference_out = reference_points
@@ -1002,7 +1010,7 @@ def build_deforamble_transformer(args):
         query_dim = 4,
         dec_layer_share = False,
         with_box_refine=True,
-        memory_bank=args.memory_bank_type == 'MemoryBankFeat',
+        memory_bank=args.memory_bank_type == 'MemoryBank',
     )
 
 

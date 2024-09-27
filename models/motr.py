@@ -203,8 +203,8 @@ class ClipMatcher(SetCriterion):
             gt_labels_target = gt_labels_target.to(src_logits)
             loss_ce = sigmoid_focal_loss(src_logits.flatten(1),
                                              gt_labels_target.flatten(1),
-                                             alpha=0.25,
-                                             gamma=2,
+                                             alpha=-1,
+                                             gamma=0,
                                              num_boxes=num_boxes, mean_in_dim1=False)
             loss_ce = loss_ce.sum()
         else:
@@ -387,7 +387,7 @@ class ClipMatcher(SetCriterion):
         ).squeeze(1)
         
         losses = {
-            "loss_mask": sigmoid_ce_loss(point_logits, point_labels, num_boxes),
+            # "loss_mask": sigmoid_ce_loss(point_logits, point_labels, num_boxes),
             "loss_dice": dice_loss(point_logits, point_labels, size, num_boxes),
         }
 
@@ -596,7 +596,7 @@ class ClipMatcher(SetCriterion):
         active_track_masks_primarly = track_instances.pred_masks[active_idxes]
         if len(active_track_masks_primarly) > 0: 
             gt_masks = gt_instances_i.masks[track_instances.matched_gt_idxes[active_idxes]].float()
-            plot_and_save_masks(active_idxes, track_instances.pred_masks, gt_masks, gt_boxes, active_track_boxes, '/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR-mask-Query-Selection/output/criterion')
+            plot_and_save_masks(active_idxes, track_instances.pred_masks, gt_masks, gt_boxes, active_track_boxes, '/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR-mask-trk-QS/output/criterion')
 
         # active_track_masks = active_track_masks.sigmoid()
         # step7. merge the unmatched pairs and the matched pairs.
@@ -864,7 +864,7 @@ class MOTR(nn.Module):
         #         nn.init.constant_(box_embed.layers[-1].bias.data[2:], 0.0)
 
         nn.init.constant_(self.transformer._bbox_embed.layers[-1].bias.data[2:], -2.0)
-        self.class_embed = nn.ModuleList([self.transformer.class_embed for _ in range(num_pred)])
+        self.class_embed = nn.ModuleList([self.class_embed for _ in range(num_pred)])
         self.bbox_embed = nn.ModuleList([self.transformer._bbox_embed for _ in range(num_pred)]) 
         self.mask_embed = nn.ModuleList([self.transformer.mask_embed for _ in range(num_pred)]) 
         
@@ -892,20 +892,22 @@ class MOTR(nn.Module):
         self.track_base = RuntimeTrackerBase()
         self.criterion = criterion
         self.memory_bank = memory_bank
-        self.mem_bank_len = 0 if memory_bank is None else memory_bank.max_his_length
+        # self.mem_bank_len = 0 if memory_bank is None else memory_bank.max_his_length
+        self.mem_bank_len = 0 if memory_bank is None else 4
         
     def _generate_empty_tracks(self, frame_shape, device):
         track_instances = Instances((1, 1))
         num_queries, dim  = self.query_embed.weight.shape
 
         if self.transformer.content_det is None and self.transformer.pos_det is None:
-            # track_instances.ref_pts = self.position.weight
-            # track_instances.query_pos = self.query_embed.weight
-            track_instances.ref_pts = torch.zeros((num_queries, 4), device=device)
-            track_instances.query_pos = torch.zeros((num_queries, 256), device=device)
+            print("No detection embedding found, initialize with random weights")
+            track_instances.ref_pts = self.position.weight
+            track_instances.query_pos = self.query_embed.weight
+            # track_instances.ref_pts = torch.zeros((num_queries, 4), device=device)
+            # track_instances.query_pos = torch.zeros((num_queries, 256), device=device)
         else:
-            track_instances.ref_pts = torch.cat([self.position.weight, self.transformer.pos_det])
-            track_instances.query_pos = torch.cat([self.query_embed.weight, self.transformer.content_det])
+            track_instances.ref_pts = torch.cat([self.position.weight, self.transformer.pos_det.weight])
+            track_instances.query_pos = torch.cat([self.query_embed.weight, self.transformer.content_det.weight])
             
         track_instances.output_embedding = torch.zeros((len(track_instances), dim), device=device)
         track_instances.obj_idxes = torch.full((len(track_instances),), -1, dtype=torch.long, device=device)
@@ -1058,7 +1060,7 @@ class MOTR(nn.Module):
                     memory=F_embeddings,
                 ).unsqueeze(0)
                 pred_mask = torch.einsum("bqc,bchw->bqhw", cross_attended_output, attention_embedding)
-                all_layer_masks.append(pred_mask)  # Append current layer's predictions
+                all_layer_masks.append(pred_mask.sigmoid())  # Append current layer's predictions
 
             # Stack all layer predictions
             pred_masks = torch.stack(all_layer_masks, dim=0)  # Shape: [num_layers, num_imgs, num_queries, H, W]
@@ -1088,6 +1090,9 @@ class MOTR(nn.Module):
             else:
                 track_scores = frame_res['pred_logits'][0, :, 0].sigmoid()
         
+        high_scores = track_scores[track_scores > 0.5]
+        print("Track scores:", high_scores)
+        
         track_instances.scores = track_scores
         track_instances.pred_logits = frame_res['pred_logits'][0]
         track_instances.pred_boxes = frame_res['pred_boxes'][0]
@@ -1104,7 +1109,11 @@ class MOTR(nn.Module):
             self.track_base.update(track_instances)
             
         if self.memory_bank is not None:
+            # print(f"Type of self.memory_bank: {type(self.memory_bank)}")
             track_instances = self.memory_bank(track_instances)
+            out_dir= '/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR-mask-trk-QS/output/trk_inst_mem.txt'
+            with open (out_dir, 'w') as f:
+                f.write(str(track_instances))
             if self.training:
                 self.criterion.calc_loss_for_track_scores(track_instances)
                 
@@ -1126,6 +1135,16 @@ class MOTR(nn.Module):
         if track_instances is None:
             track_instances = self._generate_empty_tracks(ori_img_size, 'cuda:0')
         else:
+            empty = self._generate_empty_tracks(ori_img_size, 'cuda:0')
+            if not hasattr(track_instances, 'pred_boxes'):
+                # Assuming `track_instances` should have the same number of queries as the output of `_generate_empty_tracks`
+                num_queries = len(track_instances)
+                
+                # Initialize pred_boxes to a default value (e.g., zeros). Adjust dimensions as needed.
+                track_instances.pred_boxes = torch.zeros((num_queries, 4), device=track_instances.query_pos.device)
+                track_instances.pred_logits = torch.zeros((len(track_instances), self.num_classes), dtype=torch.float, device=track_instances.query_pos.device)
+                track_instances.pred_masks = torch.zeros((len(track_instances), empty.pred_masks.shape[1], empty.pred_masks.shape[2]), dtype=torch.float, device=track_instances.query_pos.device)
+
             track_instances = Instances.cat([
                 self._generate_empty_tracks(ori_img_size, 'cuda:0'),
                 track_instances])
@@ -1266,7 +1285,7 @@ def build(args):
         weight_dict.update({"frame_{}_loss_ce".format(i): args.cls_loss_coef,
                             'frame_{}_loss_bbox'.format(i): args.bbox_loss_coef,
                             'frame_{}_loss_giou'.format(i): args.giou_loss_coef,
-                            'frame_{}_loss_mask'.format(i): args.mask_loss_coef,
+                            # 'frame_{}_loss_mask'.format(i): args.mask_loss_coef,
                             'frame_{}_loss_dice'.format(i): args.dice_loss_coef,
                             
                             })
@@ -1279,7 +1298,7 @@ def build(args):
                 weight_dict.update({"frame_{}_aux{}_loss_ce".format(i, j): args.cls_loss_coef,
                                     'frame_{}_aux{}_loss_bbox'.format(i, j): args.bbox_loss_coef,
                                     'frame_{}_aux{}_loss_giou'.format(i, j): args.giou_loss_coef,
-                                    'frame_{}_aux{}_loss_mask'.format(i, j): args.mask_loss_coef,
+                                    # 'frame_{}_aux{}_loss_mask'.format(i, j): args.mask_loss_coef,
                                     'frame_{}_aux{}_loss_dice'.format(i, j): args.dice_loss_coef,
                                     })
                     
@@ -1289,15 +1308,16 @@ def build(args):
             'frame_{}_aux_loss_ce_interm'.format(i): args.cls_loss_coef,
             'frame_{}_aux_loss_bbox_interm'.format(i): args.bbox_loss_coef,
             'frame_{}_aux_loss_giou_interm'.format(i): args.giou_loss_coef,
-            'frame_{}_aux_loss_mask_interm'.format(i): args.mask_loss_coef,
+            # 'frame_{}_aux_loss_mask_interm'.format(i): args.mask_loss_coef,
             'frame_{}_aux_loss_dice_interm'.format(i): args.dice_loss_coef,
             
             })
 
 
     # Optional: Memory bank weights if applicable
-    if args.memory_bank_type is not None and args.memory_bank_type:
+    if args.memory_bank_type is not None and args.memory_bank_type == 'MemoryBank':
         memory_bank = build_memory_bank(args, d_model, hidden_dim, d_model * 2)
+        # print('memory_bank:', memory_bank)
         for i in range(num_frames_per_batch):
             weight_dict.update({
                 f"frame_{i}_track_loss_ce": args.cls_loss_coef  # Tracking specific class loss if using memory bank

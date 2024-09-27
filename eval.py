@@ -42,8 +42,26 @@ from typing import List
 from util.evaluation import Evaluator
 import motmetrics as mm
 import shutil
-
+from pycocotools import mask as mask_util
 from models.structures import Instances
+import os.path as osp
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+from pycocotools import mask as mask_utils
+import pycocotools.mask as mask_utils
+from scipy.ndimage import gaussian_filter
+from scipy.ndimage import gaussian_filter, binary_opening, binary_closing
+from skimage.filters import threshold_otsu
+from skimage.morphology import square
+import pandas as pd
+import datetime
+from matplotlib import patches
+from matplotlib.colors import Normalize
+import matplotlib.cm as cm
+from util.thresholding import sauvola_threshold, niblack_threshold, nick_threshold, apply_threshold, apply_gaussian_filter
+from skimage.filters import threshold_otsu, threshold_niblack, threshold_sauvola
+from scipy.ndimage import binary_opening, binary_closing, generate_binary_structure
+from scipy.ndimage import label, find_objects
 
 np.random.seed(2020)
 
@@ -119,7 +137,7 @@ def draw_bboxes(ori_img, bbox, identities=None, offset=(0, 0), cvt_color=False):
 def draw_points(img: np.ndarray, points: np.ndarray, color=(255, 255, 255)) -> np.ndarray:
     assert len(points.shape) == 2 and points.shape[1] == 2, 'invalid points shape: {}'.format(points.shape)
     for i, (x, y) in enumerate(points):
-        if i >= 300:
+        if i >= 100:
             color = (0, 255, 0)
         cv2.circle(img, (int(x), int(y)), 2, color=color, thickness=2)
     return img
@@ -160,7 +178,7 @@ class MOTR(object):
             label = dt_instances.labels[i]
             if label == 0:
                 id = dt_instances.obj_idxes[i]
-                box_with_score = np.concatenate([dt_instances.boxes[i], dt_instances.scores[i:i+1]], axis=-1)
+                box_with_score = np.concatenate([dt_instances.boxes[i], dt_instances.masks[i].flatten(), dt_instances.scores[i:i+1]], axis=-1)
                 ret.append(np.concatenate((box_with_score, [id + 1])).reshape(1, -1))  # +1 as MOT benchmark requires positive
 
         if len(ret) > 0:
@@ -168,30 +186,56 @@ class MOTR(object):
         return np.empty((0, 6))
 
 
-def load_label(label_path: str, img_size: tuple) -> dict:
-    labels0 = np.loadtxt(label_path, dtype=np.float32).reshape(-1, 6)
-    h, w = img_size
-    # Normalized cewh to pixel xyxy format
-    labels = labels0.copy()
-    labels[:, 2] = w * (labels0[:, 2] - labels0[:, 4] / 2)
-    labels[:, 3] = h * (labels0[:, 3] - labels0[:, 5] / 2)
-    labels[:, 4] = w * (labels0[:, 2] + labels0[:, 4] / 2)
-    labels[:, 5] = h * (labels0[:, 3] + labels0[:, 5] / 2)
-    targets = {'boxes': [], 'labels': [], 'area': []}
-    num_boxes = len(labels)
 
-    visited_ids = set()
-    for label in labels[:num_boxes]:
-        obj_id = label[1]
-        if obj_id in visited_ids:
-            continue
-        visited_ids.add(obj_id)
-        targets['boxes'].append(label[2:6].tolist())
-        targets['area'].append(label[4] * label[5])
-        targets['labels'].append(0)
-    targets['boxes'] = np.asarray(targets['boxes'])
-    targets['area'] = np.asarray(targets['area'])
-    targets['labels'] = np.asarray(targets['labels'])
+def decode_RLE_to_mask(rle_str, h, w):
+    rle = {
+        'counts': rle_str,
+        'size': [h, w]
+    }
+    mask = mask_utils.decode(rle)
+    return mask
+
+#
+
+
+def load_label(combined_path: str, img_size: tuple) -> dict:
+    targets = {'boxes': [], 'masks': [], 'area': [], 'labels': [], 'obj_ids' : []}
+    h, w = img_size  # Image dimensions
+
+    if osp.isfile(combined_path):
+        # Load combined data (bbox + RLE mask)
+        with open(combined_path, 'r') as f:
+            for line in f:
+                parts = line.strip().split()
+                frame_id = parts[0] 
+                obj_id= parts[1] 
+                normalized_bbox = list(map(float, parts[2:6])) 
+                rle_str = parts[6]
+                cx, cy, bw, bh = normalized_bbox
+                x1 = (cx - bw / 2) * w
+                y1 = (cy - bh / 2) * h
+                x2 = (cx + bw / 2) * w
+                y2 = (cy + bh / 2) * h
+        
+
+                # Decode RLE to mask
+                mask = decode_RLE_to_mask(rle_str, int(h), int(w))
+
+                # Append data to targets
+                targets['boxes'].append([x1, y1, x2, y2])
+                targets['masks'].append(mask)
+                targets['area'].append((x2 - x1) * (y2 - y1))
+                targets['labels'].append(0)  # Assuming single class for simplicity
+                targets['obj_ids'].append(obj_id)
+
+        # Convert lists to tensors
+        targets['boxes'] = np.asarray(targets['boxes'], dtype=np.float32).reshape(-1, 4)
+        targets['area'] = np.asarray(targets['area'], dtype=np.float32)
+        targets['labels'] = np.asarray(targets['labels'], dtype=np.int64)
+        targets['masks'] = np.stack([torch.from_numpy(np.array(m)) for m in targets['masks']])
+        targets['obj_ids'] = np.asarray(targets['obj_ids'], dtype=np.int64)
+    else:
+        raise ValueError('Invalid path provided: ' + combined_path)
     return targets
 
 
@@ -268,9 +312,15 @@ class Detector(object):
         self.detr = model
 
         self.seq_num = seq_num
-        img_list = os.listdir(os.path.join(self.args.mot_path, 'MOT15/images/train', self.seq_num, 'img1'))
-        img_list = [os.path.join(self.args.mot_path, 'MOT15/images/train', self.seq_num, 'img1', _) for _ in img_list if
+        # The code is using the `os` module in Python to list all the files in the directory specified
+        # by the path `os.path.join(self.args.mot_path, 'MOTS/train/images', self.seq_num, 'img1')`.
+        # It is storing the list of filenames in the variable `img_list`.
+        img_list = os.listdir(os.path.join(self.args.mot_path, 'MOTS/train/images', self.seq_num, 'img1'))
+        img_list = [os.path.join(self.args.mot_path, 'MOTS/train/images', self.seq_num, 'img1', _) for _ in img_list if
                     ('jpg' in _) or ('png' in _)]
+        # img_list = os.listdir(os.path.join(self.args.mot_path, 'MOTS/test/images', self.seq_num, 'img1'))
+        # img_list = [os.path.join(self.args.mot_path, 'MOTS/test/images', self.seq_num, 'img1', _) for _ in img_list if
+        #             ('jpg' in _) or ('png' in _)]
 
         self.img_list = sorted(img_list)
         self.img_len = len(self.img_list)
@@ -283,21 +333,106 @@ class Detector(object):
         self.img_width = 1536
         self.mean = [0.485, 0.456, 0.406]
         self.std = [0.229, 0.224, 0.225]
-
+        
+        self.mask_statistics = pd.DataFrame(columns=['frame_id', 'track_id', 'mask_max', 'mask_min', 'mask_mean'])
+        
         self.save_path = os.path.join(self.args.output_dir, 'results/{}'.format(seq_num))
         os.makedirs(self.save_path, exist_ok=True)
 
         self.predict_path = os.path.join(self.args.output_dir, 'preds', self.seq_num)
         os.makedirs(self.predict_path, exist_ok=True)
-        if os.path.exists(os.path.join(self.predict_path, 'gt.txt')):
-            os.remove(os.path.join(self.predict_path, 'gt.txt'))
+        if os.path.exists(os.path.join(self.predict_path,  'gt.txt')):
+            os.remove(os.path.join(self.predict_path,  'gt.txt'))
 
-    def load_img_from_file(self, f_path):
+    
+    def load_img_from_file(self, f_path): 
+        
+        # def visualize_annotations(image, targets):
+        #     fig, ax = plt.subplots(1, figsize=(12, 9))
+        #     ax.imshow(image)
+        #     # If targets is None or empty, just show the image
+        #     if not targets:
+        #         plt.show()
+        #         return
+        #     # Otherwise, loop through the targets and plot them
+        #     for box, mask in zip(targets['boxes'], targets['masks']):
+        #         # Draw the bounding box
+        #         # rect = patches.Rectangle((box[0], box[1]), box[2] - box[0], box[3] - box[1], linewidth=2, edgecolor='b', facecolor='none')
+        #         # ax.add_patch(rect)
+        #         # Overlay the mask on the image
+        #         color_mask = np.zeros((image.shape[0], image.shape[1], 4), dtype=np.uint8)
+        #         color_mask[mask > 0] = [0 , 255 , 0, 127]  # Green with half transparency
+        #         # Overlay the color mask on the image
+        #         ax.imshow(color_mask)
+        #     plt.axis('off')
+        #     plt.show()
+        
+
+        # def visualize_annotations(image, targets):
+        #     fig, ax = plt.subplots(1, figsize=(12, 9))
+        #     ax.imshow(image)
+
+        #     if not targets:
+        #         plt.show()
+        #         return
+
+        #     unique_ids = np.unique(targets['obj_ids'])  # Get unique IDs to ensure colormap consistency
+        #     cmap = plt.cm.get_cmap('tab20', len(unique_ids))
+        #     norm = plt.Normalize(vmin=0, vmax=len(unique_ids))
+
+        #     for box, mask, obj_id in zip(targets['boxes'], targets['masks'], targets['obj_ids']):
+        #         index = np.where(unique_ids == obj_id)[0][0]  # Find the index of obj_id in unique_ids
+        #         color = cmap(norm(index))
+        #         color_mask = np.zeros((image.shape[0], image.shape[1], 4), dtype=np.uint8)
+        #         color_mask[mask > 0] = np.array(color) * 255
+        #         ax.imshow(color_mask)
+
+        #     plt.axis('off')
+        #     plt.show()
+
+        def visualize_annotations(image, targets, output_dir):
+            # Ensure the output directory exists
+            os.makedirs(output_dir, exist_ok=True)
+
+            fig, ax = plt.subplots(1, figsize=(12, 9))
+            ax.imshow(image)
+
+            if not targets:
+                # Save the plain image if no targets are present
+                filepath = os.path.join(output_dir, datetime.now().strftime("plain_image_%Y%m%d_%H%M%S.png"))
+                plt.savefig(filepath)
+                plt.close(fig)
+                return
+
+            unique_ids = np.unique(targets['obj_ids'])  # Get unique IDs to ensure colormap consistency
+            cmap = cm.get_cmap('tab20', len(unique_ids))
+            norm = Normalize(vmin=0, vmax=len(unique_ids))
+
+            for box, mask, obj_id in zip(targets['boxes'], targets['masks'], targets['obj_ids']):
+                index = np.where(unique_ids == obj_id)[0][0]  # Find the index of obj_id in unique_ids
+                color = cmap(norm(index))
+                color_mask = np.zeros((image.shape[0], image.shape[1], 4), dtype=np.uint8)
+                color_mask[mask > 0] = np.array(color) * 255
+                ax.imshow(color_mask)
+
+            plt.axis('off')
+
+            # Save the annotated image
+            filepath = os.path.join(output_dir, datetime.datetime.now().strftime("annotated_image_%Y%m%d_%H%M%S.png"))
+            plt.savefig(filepath)
+            plt.close(fig)
+        
+        #For test
         label_path = f_path.replace('images', 'labels_with_ids').replace('.png', '.txt').replace('.jpg', '.txt')
         cur_img = cv2.imread(f_path)
         cur_img = cv2.cvtColor(cur_img, cv2.COLOR_BGR2RGB)
-        targets = load_label(label_path, cur_img.shape[:2]) if os.path.exists(label_path) else None
-        return cur_img, targets
+        img_size = (cur_img.shape[0], cur_img.shape[1])
+        
+        #For test
+        # targets = load_label(label_path, img_size) 
+        # visualize_annotations(cur_img, targets, '/home/zahra/Documents/Projects/prototype/MOTR-codes/test_mask/MOTR-MOTR_version2_mask_applemots/output/MOTS_gt/seq11')
+        # return cur_img, targets
+        return cur_img
 
     def init_img(self, img):
         ori_img = img.copy()
@@ -323,23 +458,235 @@ class Detector(object):
         areas = wh[:, 0] * wh[:, 1]
         keep = areas > area_threshold
         return dt_instances[keep]
-
+    
+        
     @staticmethod
-    def write_results(txt_path, frame_id, bbox_xyxy, identities):
-        save_format = '{frame},{id},{x1},{y1},{w},{h},1,-1,-1,-1\n'
+    def write_results(txt_path, mask_statistics, frame_id, bbox_xyxy, masks, identities):
+        processed_masks = []  
+        threshold_iou = 0.1   
+        
+        def iou_mask(mask1, mask2):
+            """Calculate the Intersection over Union (IoU) of two binary masks."""
+            intersection = np.logical_and(mask1, mask2)
+            union = (np.logical_or(mask1, mask2))
+            iou = (np.sum(intersection) / np.sum(union))
+            return iou
+        
+        def safe_iou(pred_mask, gt_mask):
+            # Calculate intersection and union
+            intersection = np.logical_and(pred_mask, gt_mask)
+            union = np.logical_or(pred_mask, gt_mask)
+            
+            # Sum the areas
+            intersection_sum = np.sum(intersection)
+            union_sum = np.sum(union)
+            
+            # Check for zero union case
+            if union_sum == 0:
+                return 0.0  # Return an IoU of 0 if there's no union; alternative approaches could be used based on context
+            else:
+                return intersection_sum / union_sum
+        
+        def sigmoid(x):
+            return 1 / (1 + np.exp(-x))
+
+        def plot_mask(mask, title):
+            if isinstance(mask, torch.Tensor):
+                mask = mask.cpu().numpy()
+            plt.imshow(mask, cmap='gray')
+            plt.title(title)
+            plt.axis('off')
+            plt.show()
+    
+    
+        def encode_mask_to_RLE_results(binary_mask):
+            if isinstance(binary_mask, torch.Tensor):
+                # Convert to a NumPy array and ensure it's uint8
+                binary_mask = binary_mask.cpu().numpy().astype(np.uint8)
+            else:
+                # If it's already a NumPy array, just ensure it's the correct type
+                binary_mask = binary_mask.astype(np.uint8)
+            fortran_binary_mask = np.asfortranarray(binary_mask)
+            rle = mask_utils.encode(fortran_binary_mask)
+            return rle['counts'].decode('ascii')
+        
+        
+        # Prepare to collect statistics
+        # mask_statistics = pd.DataFrame(columns=['frame_id', 'track_id', 'mask_max', 'mask_min', 'mask_mean'])
+        # save_format = '{frame},{id},{mask_height},{mask_width},{mask_rle},{x1},{y1},{w},{h},1,-1,-1,-1\n'
+        save_format = '{frame},{id},{class_id},{mask_height},{mask_width},{mask_rle}\n'
         with open(txt_path, 'a') as f:
-            for xyxy, track_id in zip(bbox_xyxy, identities):
+            for xyxy, mask, track_id in zip(bbox_xyxy, masks, identities):
+                
+                # Collect data for histogram
+                # mask_max = mask.max()
+                # mask_min = mask.min()
+                # mask_mean = mask.mean() 
+                
+                # Append the stats to the DataFrame
+                # mask_statistics = mask_statistics.append({
+                #     'frame_id': frame_id,
+                #     'track_id': track_id,
+                #     'mask_max': mask_max,
+                #     'mask_min': mask_min,
+                #     'mask_mean': mask_mean
+                # }, ignore_index=True)
+        
+                
                 if track_id < 0 or track_id is None:
                     continue
-                x1, y1, x2, y2 = xyxy
-                w, h = x2 - x1, y2 - y1
-                line = save_format.format(frame=int(frame_id), id=int(track_id), x1=x1, y1=y1, w=w, h=h)
-                f.write(line)
+               
+                # Adaptive threshold
+                # smooth_mask = gaussian_filter(mask, sigma=1)
+                
+                # smooth_mask = apply_gaussian_filter(mask, sigma=1)
+                # Exclude zero values for thresholding calculation
+                # nonzero_mask_values = smooth_mask[smooth_mask > 0]
+                # if nonzero_mask_values.size > 0:
+                #     optimal_threshold = threshold_otsu(nonzero_mask_values)
+                # else:
+                #     # Default threshold if mask has no non-zero values
+                #     optimal_threshold = 0.5
+                
+                # # Apply threshold
+                # binary_mask = smooth_mask > optimal_threshold
+    
+                    
+                # Hard threshold
+                # mask = smooth_mask>0.3
+
+                # Train
+                smooth_mask = gaussian_filter(mask, sigma=1)
+                # mask = mask>0.7
+                # mask = apply_adaptive_threshold(mask)
+
+                # Train: Adaptive local threshold
+                thresh_sauvola = threshold_sauvola(smooth_mask, window_size=25)
+                valid_thresholds = thresh_sauvola[thresh_sauvola > 0.001] 
+
+                if valid_thresholds.size > 0:
+                    # If there are valid values, replace thresholds <= 0.001 with the minimum valid value
+                    min_valid_value = np.min(valid_thresholds)  # ensure only valid values are considered
+                    thresh_sauvola[thresh_sauvola <= 0.001] = min_valid_value
+                else:
+                    thresh_sauvola[:] = 0.5
+
+                binary_mask = smooth_mask > thresh_sauvola
+                
+                # binary_mask = smooth_mask > 0.5
+                # Label connected components
+                labeled_array, num_features = label(binary_mask)
+
+                # Measure sizes of components
+                sizes = np.bincount(labeled_array.ravel())
+                mask_sizes = sizes > 1150  # 1080*1920
+                # mask_sizes = sizes > 200  # 640*480
+                mask_sizes[0] = 0  # Background size (zero) must not be removed
+
+                # Apply the mask to the labeled array
+                connected_component_mask = mask_sizes[labeled_array]
+                
+                # Morphological opening and closing
+                struct = generate_binary_structure(2, 1)
+                opened_mask = binary_opening(connected_component_mask, structure=struct)
+                mask = binary_closing(opened_mask, structure=struct)
+                
+                # # Test: Adaptive local threshold
+                # thresh_sauvola = threshold_sauvola(smooth_mask, window_size=25)
+                # valid_thresholds = thresh_sauvola[thresh_sauvola > 0.1] 
+
+                # if valid_thresholds.size > 0:
+                #     # If there are valid values, replace thresholds <= 0.001 with the minimum valid value
+                #     min_valid_value = np.min(valid_thresholds)  # ensure only valid values are considered
+                #     thresh_sauvola[thresh_sauvola <= 0.1] = min_valid_value
+                # else:
+                #     thresh_sauvola[:] = 0.3
+
+                # # binary_mask = smooth_mask > thresh_sauvola
+                # binary_mask = smooth_mask > 0.2
+                
+                # # Manual threshold onnected components
+                # # labeled_array, num_features = label(binary_mask)
+                # # sizes = np.bincount(labeled_array.ravel())
+                # # mask_sizes = sizes > 1800  # 1080*1920
+                # # # mask_sizes = sizes > 200  # 640*480
+                # # mask_sizes[0] = 0  # Background size (zero) must not be removed
+                # # connected_component_mask = mask_sizes[labeled_array]
+                
+                # # Adaptive threshold onnected components
+                # labeled_array, num_features = label(binary_mask)
+                # component_slices = find_objects(labeled_array)
+                # # component_areas = [labeled_array[s].size for s in component_slices]
+                # component_areas = np.bincount(labeled_array.ravel())[1:]
+                # if component_areas.size > 0:
+                #     largest_component_index = np.argmax(component_areas) + 1  # +1 because labels start from 1
+                #     connected_component_mask = (labeled_array == largest_component_index)
+                # else:
+                #     connected_component_mask = binary_mask
+                    
+                # # Morphological opening and closing
+                # struct = generate_binary_structure(2, 2)
+                # opened_mask = binary_opening(connected_component_mask, structure=struct)
+                # closed_mask = binary_closing(opened_mask, structure=struct)
+                # closed_mask = binary_closing(closed_mask, structure=struct)
+                # closed_mask = binary_closing(closed_mask, structure=struct)
+                # mask = binary_closing(closed_mask, structure=struct) 
+
+                
+                # plt.figure(figsize=(8, 7))
+                # plt.subplot(2, 2, 1)
+                # plt.imshow(binary_mask)
+                # plt.title('sauvola')
+                # plt.axis('off')
+                
+                
+                # plt.subplot(2, 2, 2)
+                # plt.imshow(connected_component_mask)
+                # plt.title('connected_component_mask')
+                # plt.axis('off')
+                
+                
+                # plt.subplot(2, 2, 3)
+                # plt.imshow(opened_mask)
+                # plt.title('opened_mask')
+                # plt.axis('off')
+                
+                # plt.subplot(2, 2, 4)
+                # plt.imshow(mask)
+                # plt.title('Connected Component')
+                # plt.axis('off')
+                
+                # plt.show()
+                
+                # Check for duplicates
+                # is_duplicate = any(iou_mask(mask, pm) > threshold_iou for pm in processed_masks)
+                is_duplicate = any(safe_iou(mask, pm) > threshold_iou for pm in processed_masks)
+                if not is_duplicate:
+                    processed_masks.append(mask)
+                    class_id = 2
+                    x1, y1, x2, y2 = xyxy
+                    w, h = x2 - x1, y2 - y1
+                    mask_height, mask_width= mask.shape[0], mask.shape[1]
+                    mask_rle = encode_mask_to_RLE_results(mask)
+                    # plot_mask(mask, f"Track ID: {track_id}, Frame ID: {frame_id}")
+                    
+                    line = save_format.format(frame=int(frame_id), id=int(track_id), class_id = int(class_id), mask_height=int(mask_height),mask_width=int(mask_width),mask_rle=mask_rle)
+                    f.write(line)
+                # else:
+                #     print('iou_mask(mask, pm)')
+        # current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        # Append the timestamp to your filename
+        # filename = f'/home/zahra/Documents/Projects/prototype/MOTR-codes/test_mask/MOTR-MOTR_version2_mask_applemots/distribution/mask_statistics_{current_time}.csv'
+        # mask_statistics.to_csv(filename, index=False)
 
     def eval_seq(self):
-        data_root = os.path.join(self.args.mot_path, 'MOT15/images/train')
+        data_root = os.path.join(self.args.mot_path, 'MOTS/train/images')
+        # data_root = os.path.join(self.args.mot_path, 'MOTS/test/images')
+        # print("Self.predict_path is:", self.predict_path)
         result_filename = os.path.join(self.predict_path, 'gt.txt')
         evaluator = Evaluator(data_root, self.seq_num)
+        # print('result_filename is:', result_filename)
         accs = evaluator.eval_file(result_filename)
         return accs
 
@@ -356,22 +703,32 @@ class Detector(object):
             img_show = draw_bboxes(img_show, gt_boxes, identities=np.ones((len(gt_boxes), )) * -1)
         cv2.imwrite(img_path, img_show)
 
-    def detect(self, prob_threshold=0.7, area_threshold=100, vis=False):
+    # def detect(self, prob_threshold=0.6, area_threshold=100, vis=False):
+    def detect(self, prob_threshold=0.8, area_threshold=100, vis=False):
         total_dts = 0
         track_instances = None
         max_id = 0
         for i in tqdm(range(0, self.img_len)):
-            img, targets = self.load_img_from_file(self.img_list[i])
+            # img, targets = self.load_img_from_file(self.img_list[i])
+            img= self.load_img_from_file(self.img_list[i])
             cur_img, ori_img = self.init_img(img)
-
+             
             # track_instances = None
             if track_instances is not None:
+                # print('track instances:', track_instances)
                 track_instances.remove('boxes')
                 track_instances.remove('labels')
-
+                track_instances.remove('masks')
+                
             res = self.detr.inference_single_image(cur_img.cuda().float(), (self.seq_h, self.seq_w), track_instances)
             track_instances = res['track_instances']
-            max_id = max(max_id, track_instances.obj_idxes.max().item())
+            # print('track_instances:', track_instances)
+            # max_id = max(max_id, track_instances.obj_idxes.max().item())
+            if track_instances.obj_idxes.numel() > 0:
+                max_id = max(max_id, track_instances.obj_idxes.max().item())
+            else:
+                # Handle the case where there are no object indices (e.g., set max_id to a default value or skip this step)
+                max_id = max(max_id, -1)  # Assuming -1 as a default value if no objects are detected
 
             all_ref_pts = tensor_to_numpy(res['ref_pts'][0, :, :2])
             dt_instances = track_instances.to(torch.device('cpu'))
@@ -379,7 +736,7 @@ class Detector(object):
             # filter det instances by score.
             dt_instances = self.filter_dt_by_score(dt_instances, prob_threshold)
             dt_instances = self.filter_dt_by_area(dt_instances, area_threshold)
-
+            
             total_dts += len(dt_instances)
 
             if vis:
@@ -389,10 +746,23 @@ class Detector(object):
                 self.visualize_img_with_bbox(cur_vis_img_path, ori_img, dt_instances, ref_pts=all_ref_pts, gt_boxes=gt_boxes)
 
             tracker_outputs = self.tr_tracker.update(dt_instances)
+            # print("tracker_outputs[:, 4:-2]:", tracker_outputs[:, 4:-2].shape, "tracker_outputs[:, :4]:", tracker_outputs[:, :4], "tracker_outputs[:, -1]:", tracker_outputs[:, -1])
+            # For MOTS20-05 & MOTS20-06
+            img_h , img_w = ori_img.shape[0], ori_img.shape[1]
             self.write_results(txt_path=os.path.join(self.predict_path, 'gt.txt'),
+                               mask_statistics = self.mask_statistics,
                                frame_id=(i + 1),
                                bbox_xyxy=tracker_outputs[:, :4],
-                               identities=tracker_outputs[:, 5])
+                               masks = tracker_outputs[:, 4:-2].reshape(-1, img_h , img_w) ,
+                               identities=tracker_outputs[:, -1])
+            
+            # For MOTS20-02/09/11
+            # self.write_results(txt_path=os.path.join(self.predict_path, 'gt.txt'),
+            #                    mask_statistics = self.mask_statistics,
+            #                    frame_id=(i + 1),
+            #                    bbox_xyxy=tracker_outputs[:, :4],
+            #                    masks = tracker_outputs[:, 4:-2].reshape(-1, 1080, 1920) ,
+            #                    identities=tracker_outputs[:, -1])
         print("totally {} dts max_id={}".format(total_dts, max_id))
 
 
@@ -409,9 +779,21 @@ if __name__ == '__main__':
     detr = load_model(detr, args.resume)
     detr = detr.cuda()
     detr.eval()
+    
+    # seq_nums = ['MOTS20-05']
+    # seq_nums = ['MOTS20-06']
+    
+    seq_nums = ['MOTS20-02',
+                'MOTS20-05',
+                'MOTS20-09',
+                'MOTS20-11',]
+    # seq_nums = ['MOTS20-01',
+    #             'MOTS20-06',
+    #             'MOTS20-07',
+    #             'MOTS20-12',]
+   
 
-    seq_nums = ['ADL-Rundle-6', 'ETH-Bahnhof', 'KITTI-13', 'PETS09-S2L1', 'TUD-Stadtmitte', 'ADL-Rundle-8', 'KITTI-17',
-                'ETH-Pedcross2', 'ETH-Sunnyday', 'TUD-Campus', 'Venice-2']
+
     accs = []
     seqs = []
 
@@ -419,7 +801,8 @@ if __name__ == '__main__':
         print("solve {}".format(seq_num))
         det = Detector(args, model=detr, seq_num=seq_num)
         det.detect(vis=True)
-        accs.append(det.eval_seq())
+        # accs.append(det.eval_seq())
+        # print('det.eval_seq():', det.eval_seq())
         seqs.append(seq_num)
 
     metrics = mm.metrics.motchallenge_metrics
@@ -433,3 +816,4 @@ if __name__ == '__main__':
     print(strsummary)
     with open("eval_log.txt", 'a') as f:
         print(strsummary, file=f)
+
