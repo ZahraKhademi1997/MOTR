@@ -127,10 +127,10 @@ class DeformableTransformer(nn.Module):
         
         # Adding track queries
         # self.init_det = nn.Embedding(two_stage_num_proposals, d_model*2)
-        # self.content_det = None
-        # self.pos_det = None
-        self.content_det = nn.Embedding(two_stage_num_proposals, d_model)
-        self.pos_det = nn.Embedding(two_stage_num_proposals, 4)
+        self.content_det = None
+        self.pos_det = None
+        # self.content_det = nn.Embedding(two_stage_num_proposals, d_model)
+        # self.pos_det = nn.Embedding(two_stage_num_proposals, 4)
         
         self.level_embed = nn.Parameter(torch.Tensor(num_feature_levels, d_model))
         self.label_enc=nn.Embedding(num_classes,d_model)
@@ -470,11 +470,21 @@ class DeformableTransformer(nn.Module):
 
         # self.content_det = content_det.squeeze(0)
         # self.pos_det = pos_det.squeeze(0)
-        self.content_det.weight = nn.Parameter(content_det.squeeze(0))
-        self.pos_det.weight = nn.Parameter(pos_det.squeeze(0))
+        # self.content_det.weight = nn.Parameter(content_det.squeeze(0))
+        # self.pos_det.weight = nn.Parameter(pos_det.squeeze(0))
+        # if self.content_det is not None and self.pos_det is not None: 
+        #     tgt = query_embed.unsqueeze(0).expand(bs, -1, -1)
+        #     reference_points = ref_pts.unsqueeze(0).expand(bs, -1, -1)
         if self.content_det is not None and self.pos_det is not None: 
             tgt = query_embed.unsqueeze(0).expand(bs, -1, -1)
             reference_points = ref_pts.unsqueeze(0).expand(bs, -1, -1)
+        else: 
+            tgt = content_det
+            reference_points = pos_det
+            
+        self.content_det = content_det.squeeze(0)
+        self.pos_det = pos_det.squeeze(0)
+        
         init_reference_out = reference_points
 
 

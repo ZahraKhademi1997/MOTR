@@ -135,7 +135,7 @@ class QueryInteractionModule(QueryInteractionBase):
     def _select_active_tracks(self, data: dict) -> Instances:
         track_instances: Instances = data['track_instances']
         if self.training:
-            active_idxes = (track_instances.obj_idxes >= 0) & (track_instances.iou_boxes > 0.5)
+            active_idxes = (track_instances.obj_idxes >= 0) & (track_instances.iou > 0.5)
             active_track_instances = track_instances[active_idxes]
             # set -2 instead of -1 to ensure that these tracks will not be selected in matching.
             active_track_instances = self._random_drop_tracks(active_track_instances)
@@ -190,18 +190,21 @@ class QueryInteractionModule(QueryInteractionBase):
     #     init_track_instances: Instances = data['init_track_instances']
     #     merged_track_instances = Instances.cat([init_track_instances, active_track_instances])
     #     return merged_track_instances
-    def _select_active_tracks(self, data: dict) -> Instances:
-        track_instances: Instances = data['track_instances']
-        if self.training:
-            active_idxes = (track_instances.obj_idxes >= 0) | (track_instances.scores > 0.5)
-            active_track_instances = track_instances[active_idxes]
-            active_track_instances.obj_idxes[active_track_instances.iou <= 0.5] = -1
-        else:
-            active_track_instances = track_instances[track_instances.obj_idxes >= 0]
+    # def _select_active_tracks(self, data: dict) -> Instances:
+    #     track_instances: Instances = data['track_instances']
+    #     if self.training:
+    #         active_idxes = (track_instances.obj_idxes >= 0) | (track_instances.scores > 0.5)
+    #         active_track_instances = track_instances[active_idxes]
+    #         active_track_instances.obj_idxes[active_track_instances.iou <= 0.5] = -1
+    #     else:
+    #         active_track_instances = track_instances[track_instances.obj_idxes >= 0]
 
-        return active_track_instances
+    #     return active_track_instances
 
     def _update_track_embedding(self, track_instances: Instances) -> Instances:
+        if len(track_instances) == 0:
+            return track_instances
+        
         is_pos = track_instances.scores > self.score_thr
         track_instances.ref_pts[is_pos] = track_instances.pred_boxes.detach().clone()[is_pos]
 
@@ -235,7 +238,9 @@ class QueryInteractionModule(QueryInteractionBase):
     def forward(self, data) -> Instances:
         active_track_instances = self._select_active_tracks(data)
         active_track_instances = self._update_track_embedding(active_track_instances)
-        return active_track_instances
+        init_track_instances: Instances = data['init_track_instances']
+        merged_track_instances = Instances.cat([init_track_instances, active_track_instances])
+        return merged_track_instances
 
 
 

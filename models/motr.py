@@ -10,7 +10,7 @@ import cv2
 import torch.nn.functional as F
 from torch import nn, Tensor
 from typing import List
-from util.box_ops import masks_to_boxes, normalize_boxes
+from util.box_ops import masks_to_boxes, normalize_boxes, box_iou
 from util import box_ops, checkpoint
 from util.misc import (NestedTensor, nested_tensor_from_tensor_list,
                        accuracy, get_world_size, interpolate, get_rank,
@@ -203,8 +203,8 @@ class ClipMatcher(SetCriterion):
             gt_labels_target = gt_labels_target.to(src_logits)
             loss_ce = sigmoid_focal_loss(src_logits.flatten(1),
                                              gt_labels_target.flatten(1),
-                                             alpha=-1,
-                                             gamma=0,
+                                             alpha=-1, # First experiment with alpha=-1, second with alpha=0.25, third with alpha=0.75, fourth with alpha=-1
+                                             gamma=0, # First experiment with gamma=0, second with gamma=2, third with gamma=2, fourth with gamma=1
                                              num_boxes=num_boxes, mean_in_dim1=False)
             loss_ce = loss_ce.sum()
         else:
@@ -596,7 +596,7 @@ class ClipMatcher(SetCriterion):
         active_track_masks_primarly = track_instances.pred_masks[active_idxes]
         if len(active_track_masks_primarly) > 0: 
             gt_masks = gt_instances_i.masks[track_instances.matched_gt_idxes[active_idxes]].float()
-            plot_and_save_masks(active_idxes, track_instances.pred_masks, gt_masks, gt_boxes, active_track_boxes, '/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR-mask-trk-QS/output/criterion')
+            plot_and_save_masks(active_idxes, track_instances.pred_masks, gt_masks, gt_boxes, active_track_boxes, '/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR-mask-trk-QS-MLP/output/criterion')
 
         # active_track_masks = active_track_masks.sigmoid()
         # step7. merge the unmatched pairs and the matched pairs.
@@ -712,19 +712,39 @@ class RuntimeTrackerBase(object):
         self.max_obj_id = 0
 
     def update(self, track_instances: Instances):
+        device = track_instances.obj_idxes.device
         track_instances.disappear_time[track_instances.scores >= self.score_thresh] = 0
+        iou_threshold = 0.0001  # Threshold to consider object the same
+        
         for i in range(len(track_instances)):
             if track_instances.obj_idxes[i] == -1 and track_instances.scores[i] >= self.score_thresh:
-                # print("track {} has score {}, assign obj_id {}".format(i, track_instances.scores[i], self.max_obj_id))
-                track_instances.obj_idxes[i] = self.max_obj_id
-                self.max_obj_id += 1
+                has_overlap = False
+                
+                # Calculate IoU with all existing tracks that have an ID
+                for j in range(len(track_instances)):
+                    if track_instances.obj_idxes[j] >= 0:  # Consider only active tracks
+                        # print('track_instances.pred_boxes[j:j+1]:', track_instances.pred_boxes[j:j+1], 'track_instances.pred_boxes[i:i+1]:', track_instances.pred_boxes[i:i+1])
+                        iou, _= box_iou(box_cxcywh_to_xyxy(track_instances.pred_boxes[i:i+1]), box_cxcywh_to_xyxy(track_instances.pred_boxes[j:j+1]))
+                        # print('iou outside:', iou)
+                        if iou >= iou_threshold:
+                            # print('iou:',iou)
+                            has_overlap = True
+                            break
+                
+                if not has_overlap:
+                    # Assign a new ID only if there is no significant overlap
+                    # track_instances.obj_idxes[i] = self.max_obj_id
+                    # self.max_obj_id += 1
+                    new_obj = (track_instances.obj_idxes == -1) & (track_instances.scores >= self.score_thresh)
+                    num_new_objs = new_obj.sum().item()
+                    track_instances.obj_idxes[new_obj] = self.max_obj_id + torch.arange(num_new_objs, device=device)
+                    self.max_obj_id += num_new_objs
+            
             elif track_instances.obj_idxes[i] >= 0 and track_instances.scores[i] < self.filter_score_thresh:
                 track_instances.disappear_time[i] += 1
                 if track_instances.disappear_time[i] >= self.miss_tolerance:
-                    # Set the obj_id to -1.
-                    # Then this track will be removed by TrackEmbeddingLayer.
+                    # Set the obj_id to -1, marking it for removal
                     track_instances.obj_idxes[i] = -1
-
 
 class TrackerPostProcess(nn.Module):
     """ This module converts the model's output into the format expected by the coco api"""
@@ -882,6 +902,7 @@ class MOTR(nn.Module):
         # Two-stage prediction heads
         self.position = nn.Embedding(self.num_queries, 4)
         self.query_embed = nn.Embedding(self.num_queries, hidden_dim)
+        self.trk_embed = nn.Embedding(1, hidden_dim)
         self.forward_prediction_heads = self.transformer.forward_prediction_heads
         self.dn_post_process = self.transformer.dn_post_process
         self.initial_pred = initial_pred
@@ -893,21 +914,18 @@ class MOTR(nn.Module):
         self.criterion = criterion
         self.memory_bank = memory_bank
         # self.mem_bank_len = 0 if memory_bank is None else memory_bank.max_his_length
-        self.mem_bank_len = 0 if memory_bank is None else 4
+        self.mem_bank_len = 0 if memory_bank is None else 5
         
     def _generate_empty_tracks(self, frame_shape, device):
         track_instances = Instances((1, 1))
         num_queries, dim  = self.query_embed.weight.shape
 
         if self.transformer.content_det is None and self.transformer.pos_det is None:
-            print("No detection embedding found, initialize with random weights")
             track_instances.ref_pts = self.position.weight
             track_instances.query_pos = self.query_embed.weight
-            # track_instances.ref_pts = torch.zeros((num_queries, 4), device=device)
-            # track_instances.query_pos = torch.zeros((num_queries, 256), device=device)
         else:
-            track_instances.ref_pts = torch.cat([self.position.weight, self.transformer.pos_det.weight])
-            track_instances.query_pos = torch.cat([self.query_embed.weight, self.transformer.content_det.weight])
+            track_instances.ref_pts = torch.cat([self.position.weight, self.transformer.pos_det])
+            track_instances.query_pos = torch.cat([self.query_embed.weight, self.transformer.content_det + self.trk_embed.weight])
             
         track_instances.output_embedding = torch.zeros((len(track_instances), dim), device=device)
         track_instances.obj_idxes = torch.full((len(track_instances),), -1, dtype=torch.long, device=device)
@@ -1097,7 +1115,6 @@ class MOTR(nn.Module):
         track_instances.pred_logits = frame_res['pred_logits'][0]
         track_instances.pred_boxes = frame_res['pred_boxes'][0]
         track_instances.pred_masks = frame_res['pred_masks'][0]
-        # print('track_instances.pred_masks:', track_instances.pred_masks.shape)
         track_instances.output_embedding = frame_res['hs'][0]
 
         if self.training:
@@ -1118,7 +1135,7 @@ class MOTR(nn.Module):
                 self.criterion.calc_loss_for_track_scores(track_instances)
                 
         tmp = {}
-        # tmp['init_track_instances'] = self._generate_empty_tracks(((track_instances.pred_masks.shape[1], track_instances.pred_masks.shape[2])), frame_res['pred_masks'].device)
+        tmp['init_track_instances'] = self._generate_empty_tracks(((track_instances.pred_masks.shape[1], track_instances.pred_masks.shape[2])), frame_res['pred_masks'].device)
         tmp['track_instances'] = track_instances
         if not is_last:
             out_track_instances = self.track_embed(tmp)
@@ -1134,27 +1151,34 @@ class MOTR(nn.Module):
             img = nested_tensor_from_tensor_list(img)
         if track_instances is None:
             track_instances = self._generate_empty_tracks(ori_img_size, 'cuda:0')
-        else:
-            empty = self._generate_empty_tracks(ori_img_size, 'cuda:0')
-            if not hasattr(track_instances, 'pred_boxes'):
-                # Assuming `track_instances` should have the same number of queries as the output of `_generate_empty_tracks`
-                num_queries = len(track_instances)
+            # print('track instance if:', len(track_instances))
+        # else:
+        #     empty = self._generate_empty_tracks(ori_img_size, 'cuda:0')
+        #     if not hasattr(track_instances, 'pred_boxes'):
+        #         # Assuming `track_instances` should have the same number of queries as the output of `_generate_empty_tracks`
+        #         num_queries = len(track_instances)
                 
-                # Initialize pred_boxes to a default value (e.g., zeros). Adjust dimensions as needed.
-                track_instances.pred_boxes = torch.zeros((num_queries, 4), device=track_instances.query_pos.device)
-                track_instances.pred_logits = torch.zeros((len(track_instances), self.num_classes), dtype=torch.float, device=track_instances.query_pos.device)
-                track_instances.pred_masks = torch.zeros((len(track_instances), empty.pred_masks.shape[1], empty.pred_masks.shape[2]), dtype=torch.float, device=track_instances.query_pos.device)
+        #         # Initialize pred_boxes to a default value (e.g., zeros). Adjust dimensions as needed.
+        #         track_instances.pred_boxes = torch.zeros((num_queries, 4), device=track_instances.query_pos.device)
+        #         track_instances.pred_logits = torch.zeros((len(track_instances), self.num_classes), dtype=torch.float, device=track_instances.query_pos.device)
+        #         track_instances.pred_masks = torch.zeros((len(track_instances), empty.pred_masks.shape[1], empty.pred_masks.shape[2]), dtype=torch.float, device=track_instances.query_pos.device)
 
-            track_instances = Instances.cat([
-                self._generate_empty_tracks(ori_img_size, 'cuda:0'),
-                track_instances])
-            
+        #     track_instances = Instances.cat([
+        #         self._generate_empty_tracks(ori_img_size, 'cuda:0'),
+        #         track_instances])
+            # print('track instance else:', len(track_instances))
+        
+        # if track_instances is None:
+        #     track_instances = self._generate_empty_tracks(ori_img_size, 'cuda:0')
+        # print('track instance else:', len(track_instances))
+
         res = self._forward_single_image(img,
                                         track_instances=track_instances)
-        
         res = self._post_process_single_image(res, track_instances, ori_img_size,False)
         track_instances = res['track_instances']
+        # print('track instance before QIM:', len(track_instances))
         track_instances = self.post_process(track_instances, ori_img_size)
+        # print('track instance after QIM:', len(track_instances))
         
         ret = {'track_instances': track_instances}
         if 'ref_pts' in res:
@@ -1192,20 +1216,20 @@ class MOTR(nn.Module):
             
             if track_instances is None:
                 track_instances = self._generate_empty_tracks(frame_shape, device)
-            else:
-                # print('frame_shape:', frame_shape, 'track_instances:', track_instances.pred_masks.shape, 'generated:', self._generate_empty_tracks(frame_shape, device).pred_masks.shape)
-                empty_tracks = self._generate_empty_tracks(frame_shape, device)
-                new_shape = empty_tracks.pred_masks.shape[-2:]
-                existing_shape = track_instances.pred_masks.shape[-2:]
-                if new_shape != existing_shape:
-                    empty_tracks.pred_masks = F.interpolate(
-                        empty_tracks.pred_masks.unsqueeze(0),
-                        size=existing_shape,
-                        mode="bilinear",
-                        align_corners=False
-                    ).squeeze(0)
+            # else:
+            #     # print('frame_shape:', frame_shape, 'track_instances:', track_instances.pred_masks.shape, 'generated:', self._generate_empty_tracks(frame_shape, device).pred_masks.shape)
+            #     empty_tracks = self._generate_empty_tracks(frame_shape, device)
+            #     new_shape = empty_tracks.pred_masks.shape[-2:]
+            #     existing_shape = track_instances.pred_masks.shape[-2:]
+            #     if new_shape != existing_shape:
+            #         empty_tracks.pred_masks = F.interpolate(
+            #             empty_tracks.pred_masks.unsqueeze(0),
+            #             size=existing_shape,
+            #             mode="bilinear",
+            #             align_corners=False
+            #         ).squeeze(0)
                         
-                track_instances = Instances.cat([empty_tracks, track_instances])
+            #     track_instances = Instances.cat([empty_tracks, track_instances])
                 
                 
             if self.use_checkpoint and frame_index < len(frames) - 2:
