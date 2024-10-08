@@ -10,7 +10,7 @@ import cv2
 import torch.nn.functional as F
 from torch import nn, Tensor
 from typing import List
-from util.box_ops import masks_to_boxes, normalize_boxes, box_iou
+from util.box_ops import masks_to_boxes, normalize_boxes, box_iou, box_cxcywh_to_xyxy
 from util import box_ops, checkpoint
 from util.misc import (NestedTensor, nested_tensor_from_tensor_list,
                        accuracy, get_world_size, interpolate, get_rank,
@@ -702,7 +702,7 @@ class ClipMatcher(SetCriterion):
 
 
 class RuntimeTrackerBase(object):
-    def __init__(self, score_thresh=0.7, filter_score_thresh=0.6, miss_tolerance=5):
+    def __init__(self, score_thresh=0.3, filter_score_thresh=0.3, miss_tolerance=5):
         self.score_thresh = score_thresh
         self.filter_score_thresh = filter_score_thresh
         self.miss_tolerance = miss_tolerance
@@ -714,17 +714,18 @@ class RuntimeTrackerBase(object):
     def update(self, track_instances: Instances):
         device = track_instances.obj_idxes.device
         track_instances.disappear_time[track_instances.scores >= self.score_thresh] = 0
-        iou_threshold = 0.0001  # Threshold to consider object the same
+        iou_threshold = 0.0001 # Threshold to consider object the same
         
         for i in range(len(track_instances)):
             if track_instances.obj_idxes[i] == -1 and track_instances.scores[i] >= self.score_thresh:
                 has_overlap = False
+                has_overlap_trk = False
                 
                 # Calculate IoU with all existing tracks that have an ID
                 for j in range(len(track_instances)):
                     if track_instances.obj_idxes[j] >= 0:  # Consider only active tracks
                         # print('track_instances.pred_boxes[j:j+1]:', track_instances.pred_boxes[j:j+1], 'track_instances.pred_boxes[i:i+1]:', track_instances.pred_boxes[i:i+1])
-                        iou, _= box_iou(box_cxcywh_to_xyxy(track_instances.pred_boxes[i:i+1]), box_cxcywh_to_xyxy(track_instances.pred_boxes[j:j+1]))
+                        iou, _= box_iou(box_cxcywh_to_xyxy(track_instances.pred_boxes[j:j+1]), box_cxcywh_to_xyxy(track_instances.pred_boxes[i:i+1]))
                         # print('iou outside:', iou)
                         if iou >= iou_threshold:
                             # print('iou:',iou)
@@ -735,10 +736,13 @@ class RuntimeTrackerBase(object):
                     # Assign a new ID only if there is no significant overlap
                     # track_instances.obj_idxes[i] = self.max_obj_id
                     # self.max_obj_id += 1
-                    new_obj = (track_instances.obj_idxes == -1) & (track_instances.scores >= self.score_thresh)
-                    num_new_objs = new_obj.sum().item()
-                    track_instances.obj_idxes[new_obj] = self.max_obj_id + torch.arange(num_new_objs, device=device)
-                    self.max_obj_id += num_new_objs
+                    # new_obj = (track_instances.obj_idxes == -1) & (track_instances.scores >= self.score_thresh)
+                    # num_new_objs = new_obj.sum().item()
+                    # track_instances.obj_idxes[new_obj] = self.max_obj_id + torch.arange(num_new_objs, device=device)
+                    # self.max_obj_id += num_new_objs
+                    print("Assigning new ID to detection", i)
+                    track_instances.obj_idxes[i] = self.max_obj_id
+                    self.max_obj_id += 1
             
             elif track_instances.obj_idxes[i] >= 0 and track_instances.scores[i] < self.filter_score_thresh:
                 track_instances.disappear_time[i] += 1
@@ -1174,20 +1178,42 @@ class MOTR(nn.Module):
 
         res = self._forward_single_image(img,
                                         track_instances=track_instances)
-        res = self._post_process_single_image(res, track_instances, ori_img_size,False)
-        track_instances = res['track_instances']
-        # print('track instance before QIM:', len(track_instances))
-        track_instances = self.post_process(track_instances, ori_img_size)
-        # print('track instance after QIM:', len(track_instances))
-        
-        ret = {'track_instances': track_instances}
-        if 'ref_pts' in res:
-            ref_pts = res['ref_pts']
-            img_h, img_w = ori_img_size
-            scale_fct = torch.Tensor([img_w, img_h]).to(ref_pts)
-            ref_pts = ref_pts * scale_fct[None]
-            ret['ref_pts'] = ref_pts
-        return ret
+
+        if len(track_instances) > 60:
+            print('Entered if')
+            res = self._post_process_single_image(res, track_instances, ori_img_size,False)
+            track_instances = res['track_instances']
+            # print('track instance before QIM:', len(track_instances))
+            track_instances = self.post_process(track_instances, ori_img_size)
+            # print('track instance after QIM:', len(track_instances))
+            
+            ret = {'track_instances': track_instances}
+            if 'ref_pts' in res:
+                ref_pts = res['ref_pts']
+                img_h, img_w = ori_img_size
+                scale_fct = torch.Tensor([img_w, img_h]).to(ref_pts)
+                ref_pts = ref_pts * scale_fct[None]
+                ret['ref_pts'] = ref_pts
+            return ret
+        else: 
+            print('Entered else')
+            track_instances = self._generate_empty_tracks(ori_img_size, 'cuda:0')
+            res = self._forward_single_image(img,
+                                        track_instances=track_instances)
+            res = self._post_process_single_image(res, track_instances, ori_img_size,False)
+            track_instances = res['track_instances']
+            # print('track instance before QIM:', len(track_instances))
+            track_instances = self.post_process(track_instances, ori_img_size)
+            # print('track instance after QIM:', len(track_instances))
+            
+            ret = {'track_instances': track_instances}
+            if 'ref_pts' in res:
+                ref_pts = res['ref_pts']
+                img_h, img_w = ori_img_size
+                scale_fct = torch.Tensor([img_w, img_h]).to(ref_pts)
+                ref_pts = ref_pts * scale_fct[None]
+                ret['ref_pts'] = ref_pts
+            return ret
 
     def forward(self, data: dict):
         if self.training:
