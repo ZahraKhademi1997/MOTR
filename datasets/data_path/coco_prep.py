@@ -118,7 +118,7 @@ def json_to_mots(input_json_path, output_txt_path):
                     rle = mask_utils.frPyObjects([int_coords], img_height, img_width)
                     binary_mask = mask_utils.decode(rle)
                     rle_encoded = mask_utils.encode(np.asfortranarray(binary_mask))
-                    print('rle:', rle_encoded)
+                    # print('rle:', rle_encoded)
                     rle_str = rle_encoded[0]['counts'].decode('utf-8') if isinstance(rle_encoded[0]['counts'], bytes) else rle_encoded[0]['counts']
                     seq_height, seq_width = rle_encoded[0]['size']
 
@@ -126,7 +126,7 @@ def json_to_mots(input_json_path, output_txt_path):
                     # file.write(f"{frame_id},{object_id},{norm_xmin},{norm_ymin},{norm_width},{norm_height},{rle_str}\n")
                     file.write(f"{frame_id},{object_id},{xmin},{ymin},{width},{height},{seq_width}, {seq_height}, {rle_str}\n")
 
-# json_to_mots("/home/zahra/Documents/Projects/prototype/MOTR-codes/test_mask_DAB_DN_Track/data/Dataset/COCO/train/person_instances_train2014.json", "/home/zahra/Documents/Projects/prototype/MOTR-codes/test_mask_DAB_DN_Track/data/Dataset/COCO/train/images/gt/coco.txt")
+# json_to_mots("/home/zahra/Documents/Projects/prototype/MOTR-codes/test_mask_DAB_DN_Track/data/Dataset/COCO/train/person_instances_train2014.json", "/home/zahra/Documents/Projects/prototype/MOTR-codes/test_mask_DAB_DN_Track/data/Dataset/COCO/train/images/COCO_00/gt.txt")
 
 
 # Creating distinct text files
@@ -185,12 +185,12 @@ def json_to_mots(input_json_path, output_txt_path):
 #     tid_offset += max_tid_in_seq 
 
 
-# Comparing txt and jpg
-# Define the paths to your directories
+# # Comparing txt and jpg
+# # Define the paths to your directories
 # txt_dir = '/home/zahra/Documents/Projects/prototype/MOTR-codes/test_mask_DAB_DN_Track/data/Dataset/COCO/train/labels_with_ids/COCO_00/img1'
 # jpg_dir = '/home/zahra/Documents/Projects/prototype/MOTR-codes/test_mask_DAB_DN_Track/data/Dataset/COCO/train/images/COCO_00/img1'
 
-# Collect all text file basenames (without extensions)
+# # Collect all text file basenames (without extensions)
 # txt_files = {os.path.splitext(f)[0] for f in os.listdir(txt_dir) if f.endswith('.txt')}
 
 # # Loop through all JPEG files in the jpg directory
@@ -204,85 +204,85 @@ def json_to_mots(input_json_path, output_txt_path):
 #             os.remove(jpg_path)
 #             print(f"Deleted: {jpg_path}")
             
-# Collect all JPEG file basenames (without extensions)
-# jpg_files = {os.path.splitext(f)[0] for f in os.listdir(jpg_dir) if f.endswith('.jpg')}
+# # Collect all JPEG file basenames (without extensions)
+# # jpg_files = {os.path.splitext(f)[0] for f in os.listdir(jpg_dir) if f.endswith('.jpg')}
 
-# # Loop through all text files in the txt directory
-# for txt_file in os.listdir(txt_dir):
-#     if txt_file.endswith('.txt'):
-#         # Check if there's a corresponding JPEG file (without the .txt extension)
-#         txt_basename = os.path.splitext(txt_file)[0]
-#         if txt_basename not in jpg_files:
-#             # If no corresponding JPEG file, delete the text file
-#             txt_path = os.path.join(txt_dir, txt_file)
-#             os.remove(txt_path)
-#             print(f"Deleted: {txt_path}")
+# # # Loop through all text files in the txt directory
+# # for txt_file in os.listdir(txt_dir):
+# #     if txt_file.endswith('.txt'):
+# #         # Check if there's a corresponding JPEG file (without the .txt extension)
+# #         txt_basename = os.path.splitext(txt_file)[0]
+# #         if txt_basename not in jpg_files:
+# #             # If no corresponding JPEG file, delete the text file
+# #             txt_path = os.path.join(txt_dir, txt_file)
+# #             os.remove(txt_path)
+# #             print(f"Deleted: {txt_path}")
 
 
 # Plotting 
 # Path to the image and txt file
-image_path = '/home/zahra/Documents/Projects/prototype/MOTR-codes/test_mask_DAB_DN_Track/data/Dataset/COCO/train/images/COCO_00/img1/COCO_train2014_000000000109.jpg'
-txt_path = '/home/zahra/Documents/Projects/prototype/MOTR-codes/test_mask_DAB_DN_Track/data/Dataset/COCO/train/labels_with_ids/COCO_00/img1/COCO_train2014_000000000109.txt'
+# image_path = '/home/zahra/Documents/Projects/prototype/MOTR-codes/test_mask_DAB_DN_Track/data/Dataset/COCO/train/images/COCO_00/img1/COCO_train2014_000000000109.jpg'
+# txt_path = '/home/zahra/Documents/Projects/prototype/MOTR-codes/test_mask_DAB_DN_Track/data/Dataset/COCO/train/labels_with_ids/COCO_00/img1/COCO_train2014_000000000109.txt'
 
-# Check if the image file exists
-if not os.path.exists(image_path):
-    print(f"Error: Image file does not exist at {image_path}")
-else:
-    # Load the image
-    image = cv2.imread(image_path)
-    if image is None:
-        print(f"Error: Failed to load image from {image_path}")
-    else:
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+# # Check if the image file exists
+# if not os.path.exists(image_path):
+#     print(f"Error: Image file does not exist at {image_path}")
+# else:
+#     # Load the image
+#     image = cv2.imread(image_path)
+#     if image is None:
+#         print(f"Error: Failed to load image from {image_path}")
+#     else:
+#         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
-        # Function to draw a rectangle on the image
-        def draw_bbox(img, bbox, h, w):
-            print(bbox)
-            np_img = np.array(img)
-            fig, ax = plt.subplots(1, figsize=(12, 8))
-            ax.imshow(np_img)
-            cx, cy, bw, bh = bbox
-            x1 = (cx - bw / 2) * w
-            y1 = (cy - bh / 2) * h
-            x2 = (cx + bw / 2) * w
-            y2 = (cy + bh / 2) * h
-            rect = patches.Rectangle((x1, y1), x2 - x1, y2 - y1, linewidth=2, edgecolor='r', facecolor='none')
-            ax.add_patch(rect)
+#         # Function to draw a rectangle on the image
+#         def draw_bbox(img, bbox, h, w):
+#             print(bbox)
+#             np_img = np.array(img)
+#             fig, ax = plt.subplots(1, figsize=(12, 8))
+#             ax.imshow(np_img)
+#             cx, cy, bw, bh = bbox
+#             x1 = (cx - bw / 2) * w
+#             y1 = (cy - bh / 2) * h
+#             x2 = (cx + bw / 2) * w
+#             y2 = (cy + bh / 2) * h
+#             rect = patches.Rectangle((x1, y1), x2 - x1, y2 - y1, linewidth=2, edgecolor='r', facecolor='none')
+#             ax.add_patch(rect)
 
-        # Function to apply mask on the image
-        def apply_mask(img, mask):
-            for c in range(3):
-                img[:, :, c] = np.where(mask == 1, 255, img[:, :, c])
-            return img
+#         # Function to apply mask on the image
+#         def apply_mask(img, mask):
+#             for c in range(3):
+#                 img[:, :, c] = np.where(mask == 1, 255, img[:, :, c])
+#             return img
 
-        # Read the txt file and process each entry
-        with open(txt_path, 'r') as file:
-            for line in file:
-                parts = line.strip().split()
-                fid, tid, x, y, w, h, rle_str = parts
-                # print('parts:', parts)
-                bbox = [float(x), float(y), float(w), float(h)]
-                print(bbox)
-                draw_bbox(image, bbox,image.shape[0], image.shape[1]) # height, width
-                # rle_bytes = bytes(rle_str, 'utf-8')  # Convert string to bytes, handling escapes correctly
-                # print(rle_bytes)
+#         # Read the txt file and process each entry
+#         with open(txt_path, 'r') as file:
+#             for line in file:
+#                 parts = line.strip().split()
+#                 fid, tid, x, y, w, h, rle_str = parts
+#                 # print('parts:', parts)
+#                 bbox = [float(x), float(y), float(w), float(h)]
+#                 print(bbox)
+#                 draw_bbox(image, bbox,image.shape[0], image.shape[1]) # height, width
+#                 # rle_bytes = bytes(rle_str, 'utf-8')  # Convert string to bytes, handling escapes correctly
+#                 # print(rle_bytes)
 
-                rle = {
-                    'counts': rle_str, # Ensure it's a byte string
-                    'size': [image.shape[0], image.shape[1]]  # Height, width of the image
-                }
-                # print('rle:', rle)
-                try:
-                    # Decode RLE to binary mask
-                    mask = mask_utils.decode(rle)
-                    print("Mask decoded successfully.")
-                except ValueError as e:
-                    print(f"Failed to decode RLE: {e}")
+#                 rle = {
+#                     'counts': rle_str, # Ensure it's a byte string
+#                     'size': [image.shape[0], image.shape[1]]  # Height, width of the image
+#                 }
+#                 # print('rle:', rle)
+#                 try:
+#                     # Decode RLE to binary mask
+#                     mask = mask_utils.decode(rle)
+#                     print("Mask decoded successfully.")
+#                 except ValueError as e:
+#                     print(f"Failed to decode RLE: {e}")
 
-                image = apply_mask(image, mask)
+#                 image = apply_mask(image, mask)
 
-        # Display the image
-        plt.figure(figsize=(10, 10))
-        plt.imshow(image)
-        plt.axis('off')
-        plt.show()
+#         # Display the image
+#         plt.figure(figsize=(10, 10))
+#         plt.imshow(image)
+#         plt.axis('off')
+#         plt.show()
