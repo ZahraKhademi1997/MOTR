@@ -4,7 +4,16 @@
 ```
 sbatch --j query_selection slurm_query_selection.sh
 ```
+### Environment setup 
+```
+conda create -n seg-training
+conda activate
+pip install torch==2.1.0 torchvision==0.16.0 torchaudio==2.1.0 --index-url https://download.pytorch.org/whl/cu118
+pip install -r requirements.txt
 
+# conda/22.11.1 gcc/12.2.0 (set up this first before running the main.py in train-slurm.sh)
+python -u models/ops/setup.py build install 
+```
 
 This document outlines the recent enhancements and modifications to the codebase, structured by files and specific functionalities. Each point details the nature of the changes and their impact on the corresponding modules.
 
