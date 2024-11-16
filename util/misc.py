@@ -31,7 +31,7 @@ from torch import Tensor
 import torchvision
 if float(torchvision.__version__[:3]) < 0.5:
     import math
-    from torchvision.ops.misc import _NewEmptyTensorOp
+    # from torchvision.ops.misc import _NewEmptyTensorOp
     def _check_size_scale_factor(dim, size, scale_factor):
         # type: (int, Optional[List[int]], Optional[float]) -> None
         if size is None and scale_factor is None:
@@ -534,4 +534,12 @@ def inverse_sigmoid(x, eps=1e-5):
     x1 = x.clamp(min=eps)
     x2 = (1 - x).clamp(min=eps)
     return torch.log(x1/x2)
+
+def inverse_sigmoid(x, eps=1e-5):
+    # Clamping the input to ensure it is within (eps, 1-eps)
+    # This prevents log(0) which results in -inf.
+    x = x.clamp(min=eps, max=1-eps)
+    # Calculate the inverse sigmoid, also known as the logit function
+    return torch.log(x / (1 - x))
+
 
