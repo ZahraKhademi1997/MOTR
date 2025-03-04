@@ -23,8 +23,9 @@
     along with this program.  If not, see <http://www.gnu.org/licenses/>.
 """
 from __future__ import print_function
-
+from scipy.ndimage import median_filter, binary_closing, generate_binary_structure
 import os
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:64'
 import numpy as np
 import random
 import argparse
@@ -63,6 +64,11 @@ from skimage.filters import threshold_otsu, threshold_niblack, threshold_sauvola
 from scipy.ndimage import binary_opening, binary_closing, generate_binary_structure
 from scipy.ndimage import label, find_objects
 from copy import deepcopy
+from scipy.ndimage import gaussian_filter
+from scipy import ndimage
+from scipy.ndimage import binary_dilation, binary_erosion
+torch.cuda.empty_cache()
+
 
 np.random.seed(2020)
 
@@ -464,14 +470,7 @@ class Detector(object):
     @staticmethod
     def write_results(txt_path, mask_statistics, frame_id, bbox_xyxy, masks, identities):
         processed_masks = []  
-        threshold_iou = 0.1   
-        
-        def iou_mask(mask1, mask2):
-            """Calculate the Intersection over Union (IoU) of two binary masks."""
-            intersection = np.logical_and(mask1, mask2)
-            union = (np.logical_or(mask1, mask2))
-            iou = (np.sum(intersection) / np.sum(union))
-            return iou
+        threshold_iou = 0.0001  
         
         def safe_iou(pred_mask, gt_mask):
             # Calculate intersection and union
@@ -486,6 +485,7 @@ class Detector(object):
             if union_sum == 0:
                 return 0.0  # Return an IoU of 0 if there's no union; alternative approaches could be used based on context
             else:
+                # print('iou:', intersection_sum / union_sum)
                 return intersection_sum / union_sum
         
         def sigmoid(x):
@@ -498,8 +498,23 @@ class Detector(object):
             plt.title(title)
             plt.axis('off')
             plt.show()
-    
-    
+        
+        def region_growing(image, seed):
+            neighbors = [(1,0), (-1,0), (0,1), (0,-1), (1,1), (1,-1), (-1,1), (-1,-1)]
+            region_mask = np.zeros_like(image, dtype=bool)
+            stack = [seed]
+            while stack:
+                x, y = stack.pop()
+                if region_mask[x,y]:
+                    continue
+                region_mask[x,y] = True
+                for dx, dy in neighbors:
+                    nx, ny = x+dx, y+dy
+                    if (0 <= nx < image.shape[0] and 0 <= ny < image.shape[1] and 
+                        image[nx,ny] and not region_mask[nx,ny]):
+                        stack.append((nx, ny))
+            return region_mask
+        
         def encode_mask_to_RLE_results(binary_mask):
             if isinstance(binary_mask, torch.Tensor):
                 # Convert to a NumPy array and ensure it's uint8
@@ -538,101 +553,100 @@ class Detector(object):
                     continue
                
                 # Adaptive threshold
-                # smooth_mask = gaussian_filter(mask, sigma=1)
+                # smooth_mask = gaussian_filter(mask, sigma=0.001)
                 
-                # smooth_mask = apply_gaussian_filter(mask, sigma=1)
-                # Exclude zero values for thresholding calculation
-                # nonzero_mask_values = smooth_mask[smooth_mask > 0]
-                # if nonzero_mask_values.size > 0:
-                #     optimal_threshold = threshold_otsu(nonzero_mask_values)
-                # else:
-                #     # Default threshold if mask has no non-zero values
-                #     optimal_threshold = 0.5
+                # Edge detection using Sobel
+                # sobel_x = ndimage.sobel(smooth_mask, axis=0)
+                # sobel_y = ndimage.sobel(smooth_mask, axis=1)
+                # edges = np.hypot(sobel_x, sobel_y)
+
+                # # Strengthen edges by adding them back to the smoothed image
+                # smooth_mask += (edges * 0.5)  # Scale edge reinforcement as needed
+
                 
-                # # Apply threshold
-                # binary_mask = smooth_mask > optimal_threshold
-    
-                    
-                # Hard threshold
-                # mask = smooth_mask>0.3
-
-                # Train
-                smooth_mask = gaussian_filter(mask, sigma=1)
-                # mask = mask>0.7
-                # mask = apply_adaptive_threshold(mask)
-
-                # Train: Adaptive local threshold
-                thresh_sauvola = threshold_sauvola(smooth_mask, window_size=25)
-                valid_thresholds = thresh_sauvola[thresh_sauvola > 0.001] 
-
-                if valid_thresholds.size > 0:
-                    # If there are valid values, replace thresholds <= 0.001 with the minimum valid value
-                    min_valid_value = np.min(valid_thresholds)  # ensure only valid values are considered
-                    thresh_sauvola[thresh_sauvola <= 0.001] = min_valid_value
-                else:
-                    thresh_sauvola[:] = 0.6
-
-                binary_mask = smooth_mask > thresh_sauvola
-                
-                # binary_mask = smooth_mask > 0.5
-                # Label connected components
-                labeled_array, num_features = label(binary_mask)
-
-                # Measure sizes of components
-                sizes = np.bincount(labeled_array.ravel())
-                mask_sizes = sizes > 1150  # 1080*1920
-                # mask_sizes = sizes > 200  # 640*480
-                mask_sizes[0] = 0  # Background size (zero) must not be removed
-
-                # Apply the mask to the labeled array
-                mask = mask_sizes[labeled_array]
-                
-                # Morphological opening and closing
-                # struct = generate_binary_structure(2, 1)
-                # opened_mask = binary_opening(connected_component_mask, structure=struct)
-                # mask = binary_closing(opened_mask, structure=struct)
-                
-                # # Test: Adaptive local threshold
-                # thresh_sauvola = threshold_sauvola(smooth_mask, window_size=25)
-                # valid_thresholds = thresh_sauvola[thresh_sauvola > 0.1] 
+                # Adaptive local threshold
+                # thresh_sauvola = threshold_sauvola(smooth_mask, window_size=201, k=-0.05)
+                # valid_thresholds = thresh_sauvola[thresh_sauvola > 0.0001]  # Adjusted to a higher initial cut-off
 
                 # if valid_thresholds.size > 0:
-                #     # If there are valid values, replace thresholds <= 0.001 with the minimum valid value
-                #     min_valid_value = np.min(valid_thresholds)  # ensure only valid values are considered
-                #     thresh_sauvola[thresh_sauvola <= 0.1] = min_valid_value
+                #     # Replace all threshold values that are too low with the minimum valid threshold found
+                #     min_valid_value = np.min(valid_thresholds)
+                #     thresh_sauvola[thresh_sauvola <= 0.0001] = min_valid_value
                 # else:
-                #     thresh_sauvola[:] = 0.3
+                #     # Default threshold if no valid thresholds are found
+                #     thresh_sauvola[:] = 0.5
+                
+                # thresh_sauvola = threshold_sauvola(mask, window_size=75, k=-0.05)
+                # valid_thresholds = thresh_sauvola[thresh_sauvola > 0.001]  # Adjusted to a higher initial cut-off
 
-                # # binary_mask = smooth_mask > thresh_sauvola
-                # binary_mask = smooth_mask > 0.2
+                # if valid_thresholds.size > 0:
+                #     # Replace all threshold values that are too low with the minimum valid threshold found
+                #     min_valid_value = np.min(valid_thresholds)
+                #     thresh_sauvola[thresh_sauvola <= 0.01] = min_valid_value
+                # else:
+                #     # Default threshold if no valid thresholds are found
+                #     thresh_sauvopla[:] = 0.3
+                    
+                # # thresh_sauvola = median_filter(thresh_sauvola, size=3)
+                # binary_mask = mask > thresh_sauvola
                 
-                # # Manual threshold onnected components
-                # # labeled_array, num_features = label(binary_mask)
-                # # sizes = np.bincount(labeled_array.ravel())
-                # # mask_sizes = sizes > 1800  # 1080*1920
-                # # # mask_sizes = sizes > 200  # 640*480
-                # # mask_sizes[0] = 0  # Background size (zero) must not be removed
-                # # connected_component_mask = mask_sizes[labeled_array]
+                # thresholds = [0,0.1, 0.2, 0.3, 0.4, 0.5,0.6,0.7,0.8,0.9,1.0]
+                # binary_mask = mask > 0.001 #test
+                binary_mask = mask > 0.8 #train
+                mask = gaussian_filter(binary_mask , sigma=0.1) # (height, width)
+                # mask = binary_mask
                 
-                # # Adaptive threshold onnected components
+                # Morphological opening and closing train
+                # struct = generate_binary_structure(2, 2)
+                # opened_mask = binary_opening(binary_mask, structure=struct)
+                # closed_mask = binary_closing(opened_mask, structure=struct)
+                
+                # Manual connected components
                 # labeled_array, num_features = label(binary_mask)
-                # component_slices = find_objects(labeled_array)
+
+                #  Measure sizes of components
+                # sizes = np.bincount(labeled_array.ravel())
+                # mask_sizes = sizes > 1150  # 1080*1920
+                # # mask_sizes = sizes > 200  # 640*480
+                # mask_sizes[0] = 0  # Background size (zero) must not be removed
+
+                # Apply the mask to the labeled array
+                # binary_mask = mask_sizes[labeled_array]
+                
+                # Adaptive threshold connected components
+                # structure = np.ones((3,3))
+                # filtered_mask = binary_dilation(filtered_mask, structure, iterations=1)
+                # filtered_mask = binary_erosion(filtered_mask, structure, iterations=1)
+                # # For 4-connectivity (cross-shaped)
+                # # structure = np.array([[0, 1, 0],
+                # #                     [1, 1, 1],
+                # #                     [0, 1, 0]])
+                # labeled_array, num_features = label(filtered_mask, structure=structure)
+                # # component_slices = find_objects(labeled_array)
                 # # component_areas = [labeled_array[s].size for s in component_slices]
                 # component_areas = np.bincount(labeled_array.ravel())[1:]
                 # if component_areas.size > 0:
                 #     largest_component_index = np.argmax(component_areas) + 1  # +1 because labels start from 1
                 #     connected_component_mask = (labeled_array == largest_component_index)
                 # else:
-                #     connected_component_mask = binary_mask
-                    
-                # # Morphological opening and closing
+                #     connected_component_mask = filtered_mask
+                # mask = connected_component_mask
+                # mask = gaussian_filter(connected_component_mask , sigma=0.1)
+                
+                # mask = gaussian_filter(binary_mask , sigma=0.1)
+                # # mask = connected_component_mask
+                # # Apply region growing from the center of the largest component
+                # # seed = np.unravel_index(np.argmax(connected_component_mask), connected_component_mask.shape)
+                # # mask_region = region_growing(binary_mask, seed)
+                # # mask = mask_region
+                
+                # Morphological opening and closing test
                 # struct = generate_binary_structure(2, 2)
-                # opened_mask = binary_opening(connected_component_mask, structure=struct)
+                # opened_mask = binary_opening(mask_filtered, structure=struct)
                 # closed_mask = binary_closing(opened_mask, structure=struct)
                 # closed_mask = binary_closing(closed_mask, structure=struct)
-                # closed_mask = binary_closing(closed_mask, structure=struct)
+                # # closed_mask = binary_closing(closed_mask, structure=struct)
                 # mask = binary_closing(closed_mask, structure=struct) 
-
                 
                 # plt.figure(figsize=(8, 7))
                 # plt.subplot(2, 2, 1)
@@ -659,9 +673,33 @@ class Detector(object):
                 
                 # plt.show()
                 
+                
+                
+                # # cropping the masks to the bounding box with a margin
+                # x1, y1, x2, y2 = map(int, xyxy)
+                # margin = 0
+                # x1 = max(x1 - margin, 0)
+                # y1 = max(y1 - margin, 0)
+                # x2 = min(x2 + margin, mask.shape[1])
+                # y2 = min(y2 + margin, mask.shape[0])
+                # x1, y1, x2, y2 = map(int, [x1, y1, x2, y2])
+                # cropped_mask = np.zeros_like(mask)
+                # cropped_mask[y1:y2, x1:x2] = filtered_mask[y1:y2, x1:x2]
+                
+                # # Apply edge detection to the cropped mask
+                # edges = cv2.Canny((cropped_mask * 255).astype(np.uint8), 50, 150)
+                
+                # # Apply dilation to the edges to create a margin around them
+                # kernel = np.ones((1, 1), np.uint8)  # This determines the size of the margin around the edges
+                # dilated_edges = cv2.dilate(edges, kernel, iterations=2)
+
+                # # Optionally combine the dilated edges with the cropped mask
+                # mask = np.where(dilated_edges > 0, 255, cropped_mask * 255).astype(np.uint8)
+                
                 # Check for duplicates
-                # is_duplicate = any(iou_mask(mask, pm) > threshold_iou for pm in processed_masks)
-                is_duplicate = any(safe_iou(mask, pm) > threshold_iou for pm in processed_masks)
+                # is_duplicate = any(safe_iou(mask, pm) != 0 for pm in processed_masks)
+                is_duplicate = any(safe_iou(mask, pm) > 0.01 for pm in processed_masks)
+                
                 if not is_duplicate:
                     processed_masks.append(mask)
                     class_id = 2
@@ -673,13 +711,29 @@ class Detector(object):
                     
                     line = save_format.format(frame=int(frame_id), id=int(track_id), class_id = int(class_id), mask_height=int(mask_height),mask_width=int(mask_width),mask_rle=mask_rle)
                     f.write(line)
-                # else:
-                #     print('iou_mask(mask, pm)')
-        # current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                    
+                # if not is_duplicate:
+                #     processed_masks.append(mask)
+                #     class_id = 2
+                #     x1, y1, x2, y2 = xyxy
+                #     w, h = x2 - x1, y2 - y1
+                #     mask_height, mask_width = mask.shape[0], mask.shape[1]
+                #     mask_rle = encode_mask_to_RLE_results(mask)
+                #     # plot_mask(mask, f"Track ID: {track_id}, Frame ID: {frame_id}")
+                    
+                #     # Formulate the unique object ID by concatenating class ID with the track ID
+                #     unique_object_id = int(f"{int(class_id)}{int(track_id)}")
 
-        # Append the timestamp to your filename
-        # filename = f'/home/zahra/Documents/Projects/prototype/MOTR-codes/test_mask/MOTR-MOTR_version2_mask_applemots/distribution/mask_statistics_{current_time}.csv'
-        # mask_statistics.to_csv(filename, index=False)
+                #     # Prepare the line to be written in the file
+                #     save_format = "{frame} {id} {class_id} {mask_height} {mask_width} {mask_rle}"
+                #     line = save_format.format(frame=int(frame_id),
+                #                             id=unique_object_id,
+                #                             class_id=int(class_id),
+                #                             mask_height=int(mask_height),
+                #                             mask_width=int(mask_width),
+                #                             mask_rle=mask_rle)
+                #     f.write(line + "\n")
+                
 
     def eval_seq(self):
         data_root = os.path.join(self.args.mot_path, 'MOTS/train/images')
@@ -705,7 +759,7 @@ class Detector(object):
         cv2.imwrite(img_path, img_show)
 
     # def detect(self, prob_threshold=0.6, area_threshold=100, vis=False):
-    def detect(self, prob_threshold=0.7, area_threshold=100, vis=False):
+    def detect(self, prob_threshold=0.1, area_threshold=100, vis=False):
         total_dts = 0
         track_instances = None
         max_id = 0
@@ -723,6 +777,7 @@ class Detector(object):
                 
             res = self.detr.inference_single_image(cur_img.cuda().float(), (self.seq_h, self.seq_w), track_instances)
             track_instances = res['track_instances']
+            
             # print('track_instances:', track_instances)
             # max_id = max(max_id, track_instances.obj_idxes.max().item())
             if track_instances.obj_idxes.numel() > 0:
@@ -782,17 +837,30 @@ if __name__ == '__main__':
     detr = detr.cuda()
     detr.eval()
     
-    # seq_nums = ['MOTS20-05']
-    # seq_nums = ['MOTS20-06']
-    # seq_nums = ['MOTS20-09']
-    seq_nums = ['MOTS20-02',
+
+    seq_nums = [
+                'MOTS20-02',
                 'MOTS20-05',
                 'MOTS20-09',
-                'MOTS20-11',]
-    # seq_nums = ['MOTS20-01',
+                'MOTS20-11',
+                ]
+    num_frames = {
+            'MOTS20-02': [1, 600],
+            'MOTS20-05': [1, 837],
+            'MOTS20-09': [1, 525],
+            'MOTS20-11': [1, 900]
+        }
+    # seq_nums = [
+    #             'MOTS20-01',
     #             'MOTS20-06',
     #             'MOTS20-07',
     #             'MOTS20-12',]
+    # num_frames = {
+    #             'MOTS20-01': [1, 450],
+    #             'MOTS20-06': [1, 1194],
+    #             'MOTS20-07': [1, 500],
+    #             'MOTS20-12': [1, 900],
+    # }
    
 
 
@@ -802,7 +870,17 @@ if __name__ == '__main__':
     for seq_num in seq_nums:
         print("solve {}".format(seq_num))
         det = Detector(args, model=detr, seq_num=seq_num)
-        det.detect(vis=True)
+        # det.detect(vis=True)
+        # Get the start and end frame numbers from num_frames dictionary
+        start_frame, end_frame = num_frames[seq_num]
+
+        for frame_num in range(start_frame, end_frame + 1):
+            # Set threshold: 0.3 for the first frame and 0.8 for the rest
+            # threshold = 0.1 if frame_num == start_frame else 0.3 # train
+            threshold = 0.1 if frame_num == start_frame else 0.3 # test
+            det.detect(prob_threshold=threshold, area_threshold=100, vis=True)
+            break
+
         # accs.append(det.eval_seq())
         # print('det.eval_seq():', det.eval_seq())
         seqs.append(seq_num)

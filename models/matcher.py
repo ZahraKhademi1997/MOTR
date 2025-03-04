@@ -16,7 +16,7 @@ import torch
 from scipy.optimize import linear_sum_assignment
 from torch import nn
 import torch.nn.functional as F
-from util.box_ops import box_cxcywh_to_xyxy, generalized_box_iou, masks_to_boxes
+from util.box_ops import box_cxcywh_to_xyxy, generalized_box_iou, masks_to_boxes, box_xywh_to_xyxy
 from util.mask_ops import mask_iou_calculation, batch_dice_loss, batch_sigmoid_ce_loss
 from models.structures import Instances
 from util.misc import (NestedTensor, nested_tensor_from_tensor_list,
@@ -104,7 +104,24 @@ class HungarianMatcher(nn.Module):
 
 
             row_ind, col_ind = linear_sum_assignment(cost_matrix)
-            return row_ind, col_ind    
+            return row_ind, col_ind  
+        
+        def clamp_boxes(bboxes, img_width, img_height):
+            if not isinstance(bboxes, torch.Tensor):
+                bboxes = torch.tensor(bboxes, dtype=torch.float32)
+
+            # Apply max and min in a list comprehension for each bounding box coordinate
+            clamped_x1 = torch.tensor([max(0, x) for x in bboxes[:, 0]], dtype=torch.float32)
+            clamped_y1 = torch.tensor([max(0, y) for y in bboxes[:, 1]], dtype=torch.float32)
+            clamped_x2 = torch.tensor([min(img_width - 1, x) for x in bboxes[:, 2]], dtype=torch.float32)
+            clamped_y2 = torch.tensor([min(img_height - 1, y) for y in bboxes[:, 3]], dtype=torch.float32)
+
+            # Stack the clamped coordinates into a single tensor
+            clamped_boxes = torch.stack((clamped_x1, clamped_y1, clamped_x2, clamped_y2), dim=1).to(bboxes.device)
+
+            return clamped_boxes
+        
+          
         """ Performs the matching
 
         Params:
@@ -140,6 +157,7 @@ class HungarianMatcher(nn.Module):
                 else:
                     out_prob = outputs["pred_logits"].flatten(0, 1).softmax(-1)  # [batch_size * num_queries, num_classes]
             out_bbox = outputs["pred_boxes"].flatten(0, 1)  # [batch_size * num_queries, 4]
+            assert not torch.isnan(out_bbox).any(), "NaN values detected in out_bbox in matcher."
 
             # Also concat the target labels and boxes
             if isinstance(targets[0], Instances):
@@ -178,9 +196,12 @@ class HungarianMatcher(nn.Module):
             # output_dir_tgt = "/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR_mask_DN_DAB/outputs/tgt_bbox.txt"
             # with open (output_dir_tgt, 'w') as f:
             #     f.write (str(tgt_bbox))
-                
+            
             cost_giou = -generalized_box_iou(box_cxcywh_to_xyxy(out_bbox),
                                              box_cxcywh_to_xyxy(tgt_bbox))
+            # cost_giou = -generalized_box_iou(clamp_boxes(box_cxcywh_to_xyxy(out_bbox), outputs["pred_masks"].shape[3],outputs["pred_masks"].shape[2]),
+            #                                  clamp_boxes(box_cxcywh_to_xyxy(tgt_bbox), outputs["pred_masks"].shape[3],outputs["pred_masks"].shape[2]))
+            
             
             # (3) Adding out_mask
             if 'pred_masks' in outputs:

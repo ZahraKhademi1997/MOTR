@@ -720,7 +720,7 @@ def train_one_epoch_mot(model: torch.nn.Module, criterion: torch.nn.Module,
     
    
     # () Defining function to log gradient of different part of the model 
-    writer_grad = SummaryWriter('/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR-mask-Query-Selection/outputs/logs/logs_grad') 
+    writer_grad = SummaryWriter('/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR-mask-QS-trk-frozen/outputs/logs_lettuce/logs_grad') 
     def log_gradients(model, writer_grad, epoch, iteration):
         # Check if the model is wrapped in DistributedDataParallel
         if isinstance(model, torch.nn.parallel.DistributedDataParallel):
@@ -728,50 +728,47 @@ def train_one_epoch_mot(model: torch.nn.Module, criterion: torch.nn.Module,
 
         modules = {
             'backbone': model.backbone,
+            'input_proj': model.input_proj,
+            'track_embed' : model.track_embed,
+            
             'encoder': model.transformer.encoder,
             'decoder': model.transformer.decoder,
-            'input_proj': model.input_proj,
-            'PerPixelEmbedding' : model.PerPixelEmbedding,
-            'track_embed' : model.track_embed,
             'transformer box_embed' : model.transformer._bbox_embed,
             'transformer decoder box_embed' : model.transformer.decoder.bbox_embed,
-            'bbox_embed motr' : model.bbox_embed,
-            'class_embed motr' : model.class_embed,
             'class_embed transformer' : model.transformer.class_embed,
             'decoder mask_embed' : model.transformer.mask_embed,
-            'mask_head more' : model.mask_embed,
-            # 'label_enc' : model.transformer.label_enc,
-            # 'box_embed' : model.bbox_embed,
-            'AxialBlock' : model.AxialBlock,
-            'pos_cross_attention' : model.transformer.pos_cross_attention,
-            # 'autoencoder' : model.transformer.autoencoder,
-            # 'kernel' : model.transformer.kernel,
             'transformer ref_points' : model.transformer.decoder.ref_point_head,
-            # 'transformer reference points' : model.transformer.reference_points,
-            # 'transformer init_det' :  model.transformer.init_det, 
-            # 'post_process': model.post_process,
-            'position_embedding': model.position,
-            'content_embedding': model.query_embed,
-            # 'memory bank': model.memory_bank,
+            'position_embedding': model.transformer.position,
+            'content_embedding': model.transformer.query_embed,
+            'trk_embed': model.transformer.trk_embed,
+            'pos_cross_attention' : model.transformer.pos_cross_attention,
+            
+            'bbox_embed motr' : model.bbox_embed,
+            'class_embed motr' : model.class_embed,
+            'mask_head motr' : model.mask_embed,
+            'AxialBlock' : model.AxialBlock,
+            'PerPixelEmbedding' : model.PerPixelEmbedding,
+            
+            'memory bank': model.memory_bank,    
             
         }
 
         # Freeze all parameters
         # for param in model.parameters():
-        #     param.requires_grad = False
+        #     param.requires_grad = True
 
         # # Unfreeze segmentation head parameters
         # for param in model.PerPixelEmbedding.parameters():
-        #     param.requires_grad = True
+        #     param.requires_grad = False
 
         # for param in model.AxialBlock.parameters():
-        #     param.requires_grad = True
+        #     param.requires_grad = False
             
         # for param in model.transformer.pos_cross_attention.parameters():
-        #     param.requires_grad = True
+        #     param.requires_grad = False
             
-        # for param in model.transformer.parameters():
-        #     param.requires_grad = True    
+        # for param in model.transformer.mask_embed.parameters():
+        #     param.requires_grad = False   
 
         for name, module in modules.items():
             total_grad_norm = 0
@@ -781,12 +778,12 @@ def train_one_epoch_mot(model: torch.nn.Module, criterion: torch.nn.Module,
             writer_grad.add_scalar(f'grad_norm/{name}', total_grad_norm, epoch * len(data_loader) + iteration)
             
             
-    for layer in model.module.transformer.decoder.bbox_embed.modules():
-        layer.register_forward_hook(forward_hook)
-        # layer.register_backward_hook(backward_hook)
-    for idx, layer in enumerate(model.module.transformer.decoder.bbox_embed.modules()):
-        if hasattr(layer, 'weight'):
-            layer.register_backward_hook(backward_hook(idx))
+    # for layer in model.module.transformer.decoder.bbox_embed.modules():
+    #     layer.register_forward_hook(forward_hook)
+    #     # layer.register_backward_hook(backward_hook)
+    # for idx, layer in enumerate(model.module.transformer.decoder.bbox_embed.modules()):
+    #     if hasattr(layer, 'weight'):
+    #         layer.register_backward_hook(backward_hook(idx))
         
         
     iteration = 0

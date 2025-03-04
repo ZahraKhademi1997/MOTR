@@ -17,9 +17,31 @@ from torchvision.ops.boxes import box_area
 
 
 def box_cxcywh_to_xyxy(x):
+    assert not torch.isnan(x).any(), "NaN values detected in x in box_cxcywh_to_xyxy."
     x_c, y_c, w, h = x.unbind(-1)
+    # Check for zero or negative values in width and height
+    assert (w > 0).all(), "Width values must be positive and non-zero."
+    assert (h > 0).all(), "Height values must be positive and non-zero."
+    
+    # Ensure width and height are not zero to avoid division by zero
+    w = torch.clamp(w, min=1e-6)
+    h = torch.clamp(h, min=1e-6)
+    
     b = [(x_c - 0.5 * w), (y_c - 0.5 * h),
          (x_c + 0.5 * w), (y_c + 0.5 * h)]
+    
+    # Convert the list to a tensor
+    result = torch.stack(b, dim=-1)
+
+    # Final check to ensure no NaN values are generated during the computation
+    assert not torch.isnan(result).any(), "NaN values generated during conversion."
+
+    return result
+
+def box_xywh_to_xyxy(x):
+    x, y, w, h = x.unbind(-1)
+    b = [(x), (y),
+         (x + 0.5 * w), (y + 0.5 * h)]
     return torch.stack(b, dim=-1)
 
 
@@ -28,6 +50,48 @@ def box_xyxy_to_cxcywh(x):
     b = [(x0 + x1) / 2, (y0 + y1) / 2,
          (x1 - x0), (y1 - y0)]
     return torch.stack(b, dim=-1)
+
+def clamp_boxes(boxes, image_width, image_height):
+    """Clamps a bounding box to the image boundaries.
+
+    Args:
+        bbox: A tuple (x_min, y_min, x_max, y_max) representing the bounding box.
+        image_width: The width of the image.
+        image_height: The height of the image.
+
+    Returns:
+        A clamped bounding box tuple.
+    """
+    output = []
+    for i in range(boxes.shape[0]):
+        boxes_xyxy = box_cxcywh_to_xyxy(boxes[i].clone())
+        x_min, y_min, x_max, y_max = boxes_xyxy
+        clamped_boxes = torch.tensor([
+            max(0, x_min),
+            max(0, y_min),
+            min(image_width - 1, x_max),
+            min(image_height - 1, y_max)
+        ])
+        # clamped_boxes[3] = max(clamped_boxes[3], clamped_boxes[1] + 1)
+        output.append(box_xyxy_to_cxcywh(clamped_boxes))
+
+    return torch.stack(output, dim=0)
+
+
+def clamp_batch_boxes(bboxes, img_width, img_height):
+    if not isinstance(bboxes, torch.Tensor):
+        bboxes = torch.tensor(bboxes, dtype=torch.float32)
+
+    # Apply max and min in a list comprehension for each bounding box coordinate
+    clamped_x1 = torch.tensor([max(0, x) for x in bboxes[:, 0]], dtype=torch.float32)
+    clamped_y1 = torch.tensor([max(0, y) for y in bboxes[:, 1]], dtype=torch.float32)
+    clamped_x2 = torch.tensor([min(img_width - 1, x) for x in bboxes[:, 2]], dtype=torch.float32)
+    clamped_y2 = torch.tensor([min(img_height - 1, y) for y in bboxes[:, 3]], dtype=torch.float32)
+
+    # Stack the clamped coordinates into a single tensor
+    clamped_boxes = torch.stack((clamped_x1, clamped_y1, clamped_x2, clamped_y2), dim=1).to(bboxes.device)
+
+    return clamped_boxes
 
 
 # modified from torchvision to also return the union
@@ -70,14 +134,28 @@ def generalized_box_iou(boxes1, boxes2):
     #     f.write (str(boxes1))
         
     # Ensure boxes are valid
-    valid = (boxes1[:, 2:] >= boxes1[:, :2]).all(dim=1)
-    if not valid.all():
-        invalid_boxes = boxes1[~valid]
-        print("Invalid boxes:", invalid_boxes)
-        raise ValueError(f"Boxes are not valid. Ensure that x1 < x2 and y1 < y2. Found invalid boxes: {invalid_boxes}")
+    # valid = (boxes1[:, 2:] >= boxes1[:, :2]).all(dim=1)
+    # if not valid.all():
+    #     invalid_boxes = boxes1[~valid]
+    #     print("Invalid boxes:", invalid_boxes)
+    #     raise ValueError(f"Boxes are not valid. Ensure that x1 < x2 and y1 < y2. Found invalid boxes: {invalid_boxes}")
+    # print ("boxes1:", boxes1)
+    # assert (boxes1[:, 2:] >= boxes1[:, :2]).all()
+    # assert (boxes2[:, 2:] >= boxes2[:, :2]).all()
+    # Check for boxes1
+    assert not torch.isnan(boxes1).any(), "NaN values detected in boxes1 in generalized_box_iou."
+    assert not torch.isnan(boxes2).any(), "NaN values detected in boxes2 in generalized_box_iou."
     
-    assert (boxes1[:, 2:] >= boxes1[:, :2]).all()
-    assert (boxes2[:, 2:] >= boxes2[:, :2]).all()
+    if not (boxes1[:, 2:] >= boxes1[:, :2]).all():
+        invalid_boxes1 = boxes1[~(boxes1[:, 2:] >= boxes1[:, :2]).all(axis=1)]
+        raise AssertionError(f"Assertion failed: Expected all bounding boxes to have min coords <= max coords. Invalid boxes1:\n{invalid_boxes1}")
+
+    # Check for boxes2
+    if not (boxes2[:, 2:] >= boxes2[:, :2]).all():
+        invalid_boxes2 = boxes2[~(boxes2[:, 2:] >= boxes2[:, :2]).all(axis=1)]
+        raise AssertionError(f"Assertion failed: Expected all bounding boxes to have min coords <= max coords. Invalid boxes2:\n{invalid_boxes2}")
+
+
     
     # if torch.isnan(boxes1).any() or torch.isnan(boxes2).any():
     #     raise ValueError("Input boxes contain NaN values.")
@@ -85,9 +163,6 @@ def generalized_box_iou(boxes1, boxes2):
     # Check that boxes are valid (x1 < x2 and y1 < y2)
     # if not (boxes1[:, 2:] > boxes1[:, :2]).all() or not (boxes2[:, 2:] > boxes2[:, :2]).all():
     #     raise ValueError("Boxes are not valid. Ensure that x1 < x2 and y1 < y2.")
-
-
-
     iou, union = box_iou(boxes1, boxes2)
 
     lt = torch.min(boxes1[:, None, :2], boxes2[:, :2])
@@ -96,7 +171,7 @@ def generalized_box_iou(boxes1, boxes2):
     wh = (rb - lt).clamp(min=0)  # [N,M,2]
     area = wh[:, :, 0] * wh[:, :, 1]
 
-    return iou - (area - union) / area
+    return iou - ((area - union)+1e-6) / (area+1e-6)
 
 
 def masks_to_boxes(masks):

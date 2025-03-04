@@ -354,43 +354,12 @@ def dice_loss(inputs, targets, size, num_boxes):
                  classification label for each element in inputs
                 (0 for the negative class and 1 for the positive class).
     """
-    inputs = inputs.sigmoid() # For segmentation training
+    # inputs = inputs.sigmoid() # For segmentation training
     inputs_flat = inputs.flatten(1)
     numerator = 2 * (inputs_flat * targets).sum(-1)
     denominator = inputs_flat.sum(-1) + targets.sum(-1)
     loss = 1 - (numerator + 1) / (denominator + 1)
     
-    # # Plotting 
-    # print('inputs:', inputs.shape)
-    # print('targets:', targets.shape)
-    # print('size:', size)
-    # original_h, original_w = size
-    # # # Convert tensors to numpy arrays
-    # output_dir = "/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR-mask-AppleMOTS-Axial_Cross_Attention/output/pred_mask/dice_loss"
-    # inputs_reshaped = inputs.view(-1, original_h, original_w)
-    # targets_reshaped = targets.view(-1, original_h, original_w)
-
-    # # Create the directory if it doesn't exist
-    # os.makedirs(output_dir, exist_ok=True)
-
-    # # Loop through the batch and save images
-    # for i in range(inputs_reshaped.shape[0]):
-    #     if i == 1:
-    #         fig, ax = plt.subplots(1, 2, figsize=(12, 6))
-    #         ax[0].imshow(inputs_reshaped[i].detach().cpu(), cmap='gray')
-    #         ax[0].set_title('Predicted Mask')
-    #         ax[0].axis('off')
-
-    #         ax[1].imshow(targets_reshaped[i].detach().cpu(), cmap='gray')
-    #         ax[1].set_title('Ground Truth Mask')
-    #         ax[1].axis('off')
-
-    #         # Use datetime to generate a unique identifier for this particular batch and epoch
-    #         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    #         filename = f"mask_comparison_ep_idx{i}_{timestamp}.png"
-    #         plt.savefig(os.path.join(output_dir, filename))
-    #         plt.close()
-
     return loss.sum() / num_boxes
 
 

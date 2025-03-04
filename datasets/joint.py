@@ -36,9 +36,17 @@ class DetMOTDetection:
         self.video_dict = {}
         
         with open(data_txt_path, 'r') as file:
-            self.img_files = file.readlines()
-            self.img_files = [osp.join(seqs_folder, x.strip()) for x in self.img_files]
-            self.img_files = list(filter(lambda x: len(x) > 0, self.img_files))
+            # self.img_files = file.readlines()
+            # self.img_files = [osp.join(seqs_folder, x.strip()) for x in self.img_files]
+            # self.img_files = list(filter(lambda x: len(x) > 0, self.img_files))
+            lines = file.readlines()
+            self.img_files = []
+            for line in lines:
+                paths = line.strip().split(',')
+                for single_path in paths:
+                    if single_path:  # Ensure the path is not empty
+                        full_path = os.path.join(seqs_folder, single_path.strip())
+                        self.img_files.append(full_path)
 
         self.label_files = [(x.replace('images', 'labels_with_ids').replace('.png', '.txt').replace('.jpg', '.txt'))
                             for x in self.img_files]
@@ -93,10 +101,7 @@ class DetMOTDetection:
     @staticmethod
     def _targets_to_instances(targets: dict, img_shape) -> Instances:
         gt_instances = Instances(tuple(img_shape))
-        ##############################################################################################
-        # (4)
         gt_instances.masks = targets['masks']
-        ##############################################################################################
         gt_instances.boxes = targets['boxes']
         gt_instances.labels = targets['labels']
         gt_instances.obj_ids = targets['obj_ids']
@@ -107,6 +112,46 @@ class DetMOTDetection:
     # Modifying function to load masks and bboxes
     def _pre_single_frame(self, idx: int):
         
+        # Check bbox format
+        def infer_bbox_format(bboxes, img_width, img_height):
+            center_format = True
+            topleft_format = True
+            
+            for bbox in bboxes:
+                if len(bbox) == 4:  # Ensure the bbox has four elements
+                    x, y, width, height = map(float, bbox)
+                    
+                    # Assume x, y, width, and height are intended as normalized values in the range [0, 1] for center format
+                    # cx and cy are the center coordinates
+                    cx = x - width / 2
+                    cy = y - height / 2
+                    
+                    # Check center format (cxcywh) with cx and cy as the center of the bbox
+                    if not (0 <= cx <= 1 and 0 <= cy <= 1 and 0 <= cx + width <= 1 and 0 <= cy + height <= 1):
+                        center_format = False
+                    
+                    # Check top-left format (xywh) with x and y as the top-left corner of the bbox
+                    # Convert normalized coordinates to absolute by assuming x, y, width, and height are fractions of width and height
+                    abs_x = x * img_width
+                    abs_y = y * img_height
+                    abs_width = width * img_width
+                    abs_height = height * img_height
+                    
+                    if not (0 <= abs_x < img_width and 0 <= abs_y < img_height and 
+                            0 < abs_x + abs_width <= img_width and 0 < abs_y + abs_height <= img_height):
+                        topleft_format = False
+
+                if not center_format and not topleft_format:
+                    break  # No need to check further if both formats are ruled out
+
+            if center_format and not topleft_format:
+                return 'cxcywh'
+            elif topleft_format and not center_format:
+                return 'xywh'
+            else:
+                return 'ambiguous'
+  
+
         # Converting RLE to binary mask
         def decode_RLE_to_mask(rle_str, h, w):
             rle = {
@@ -118,7 +163,7 @@ class DetMOTDetection:
 
 
         # Visualization of the gt attributes
-        def plot_frame_with_annotations(img, targets):
+        def plot_frame_with_annotations(img, targets,output_dir, filename):
             """
             Plot the image with bounding boxes, masks, and object IDs from the targets.
 
@@ -148,15 +193,33 @@ class DetMOTDetection:
                 mask_np = mask.cpu().numpy()
                 ax.imshow(np.ma.masked_where(mask_np == 0, mask_np), alpha=0.5, cmap='cool')
 
-            plt.show()
-            # plt.axis('off')  
-            # plt.tight_layout()
-            # plt.savefig(os.path.join(output_dir, filename), bbox_inches='tight', pad_inches=0)
-            # plt.close(fig)  
+            # Disable the axis
+            plt.axis('off')  
+            plt.tight_layout()
+
+            # Append the current datetime to the filename to prevent overwriting
+            timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+            output_filename = f"{filename}_{timestamp}.png"
+
+            # Save the figure to the output directory
+            plt.savefig(os.path.join(output_dir, output_filename), bbox_inches='tight', pad_inches=0)
+            plt.close(fig)  
+            
+        def clamp_boxes(x1_b, y1_b, x2_b, y2_b, img_width, img_height):
+            x1 = max(0, x1_b)
+            y1 = max(0, y1_b)
+            if x2_b == 0 or y2_b == 0:
+                x2 = min(img_width-1.5, x2_b + 1e-6)
+                y2 = min(img_height-1.5, y2_b + 1e-6)
+            else:  
+                x2 = min(img_width-1.5, x2_b)
+                y2 = min(img_height-1.5, y2_b)
+            return x1, y1, x2, y2
     
         
         img_path = self.img_files[idx]
         label_path = self.label_files[idx]
+        # print('label_path is:', label_path)
         # mask_path = self.mask_files[idx]  
 
         img = Image.open(img_path)
@@ -174,6 +237,8 @@ class DetMOTDetection:
             targets['dataset'] = 'APPLE_MOTS'
         elif 'MOTS' in img_path:
             targets['dataset'] = 'MOTS'
+        elif 'LETTUCE_MOTS' in img_path:
+            targets['dataset'] = 'LETTUCE_MOTS'
         else:
             raise NotImplementedError()
         
@@ -204,19 +269,31 @@ class DetMOTDetection:
                     y1 = (cy - bh / 2) * h
                     x2 = (cx + bw / 2) * w
                     y2 = (cy + bh / 2) * h
-
+                    # x1 = (cx - bw / 2) 
+                    # y1 = (cy - bh / 2) 
+                    # x2 = (cx + bw / 2) 
+                    # y2 = (cy + bh / 2) 
+                    # x1, y1, x2, y2 = clamp_boxes(x1, y1, x2, y2, w, h)
+                    # # Convert clamped normalized coordinates to pixel coordinates
+                    # x1 = x1 * w
+                    # y1 = y1 * h
+                    # x2 = x2 * w
+                    # y2 = y2 * h
 
                     # Decode RLE to mask
                     mask = decode_RLE_to_mask(rle_str, int(h), int(w))
 
                     # Append data to targets
-                    targets['boxes'].append([x1, y1, x2, y2])
-                    targets['masks'].append(mask)
-                    targets['area'].append((x2 - x1) * (y2 - y1))
-                    targets['labels'].append(0)  
-                    targets['iscrowd'].append(0)
-                    obj_id = object_id + obj_idx_offset if object_id >= 0 else object_id
-                    targets['obj_ids'].append(obj_id)
+                    if ((x2 - x1) * (y2 - y1)) > 500:
+                        targets['boxes'].append([x1, y1, x2, y2])
+                        targets['masks'].append(mask)
+                        targets['area'].append((x2 - x1) * (y2 - y1))
+                        targets['labels'].append(0)  
+                        targets['iscrowd'].append(0)
+                        obj_id = object_id + obj_idx_offset if object_id >= 0 else object_id
+                        targets['obj_ids'].append(obj_id)
+                    else:
+                        print(f"Invalid bbox: {[x1, y1, x2, y2]} for image size {w}x{h}, object ID {object_id}, and frame {frame_id}")
                     
 
         # Convert lists to tensors
@@ -227,10 +304,8 @@ class DetMOTDetection:
         targets['obj_ids'] = torch.as_tensor(targets['obj_ids'])
         targets['masks'] = [torch.from_numpy(mask) for mask in targets['masks']]
         targets['masks'] = torch.stack(targets['masks'])
-        # print(targets)
-        # plot_frame_with_annotations(img, targets, '/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR-mask-MOT17-Cross-AA/output/gt' , 'annotated_image.png')
-        # plot_frame_with_annotations(img, targets)
-        
+        # plot_frame_with_annotations(img, targets, '/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR-mask-QS-trk-frozen/output/gt' , 'annotated_image.png')
+
         return img, targets
 
         
@@ -980,7 +1055,7 @@ def make_transforms_for_mots(image_set, args=None):
                     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S%f")
 
                     # Save the image that did not contain any valid bbox after all attempts
-                    save_failed_image_path = "/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR_mask_DN_DAB/output/customcropping"  
+                    save_failed_image_path = "/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR-mask-QS-trk-frozen/output/customcropping"  
                     failed_image_filename = f"failed_image_{img_idx}_{timestamp}.png"  # Include timestamp in the filename
                     failed_image_full_path = os.path.join(save_failed_image_path, failed_image_filename)
 
@@ -992,7 +1067,7 @@ def make_transforms_for_mots(image_set, args=None):
             return cropped_images, cropped_targets_list
     ##########################################################################
     
-    save_path = "/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR_mask_DN_DAB/output/data_aug"
+    save_path = "/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR-mask-QS-trk-frozen/output/data_aug"
     if not os.path.exists(save_path):
         os.mkdir(save_path)
     
@@ -1066,7 +1141,7 @@ def make_transforms_for_mots(image_set, args=None):
      
         # debug_transform(targets, stage, "after", image)
         
-        # save_image_with_bboxes_and_masks(image, targets, f"{stage}_final", save_path)
+        save_image_with_bboxes_and_masks(image, targets, f"{stage}_final", save_path)
 
         return image, targets
     
@@ -1085,7 +1160,7 @@ def make_transforms_for_mots(image_set, args=None):
                     ####################################################
                     # () Adding a custom crop function
                     # T.FixedMotRandomCrop(384, 600),
-                    CustomFixedRandomCrop((384, 600)),
+                    # CustomFixedRandomCrop((384, 600)),
                     ####################################################
                     T.MotRandomResize(scales, max_size=1536),
                 ]))
@@ -1154,6 +1229,9 @@ def build_dataset2transform(args, image_set):
     
     mots_train = make_transforms_for_mots('train', args)
     mots_val = make_transforms_for_mots('val', args)
+    
+    lettuce_train = make_transforms_for_mots('train', args)
+    lettuce_val = make_transforms_for_mots('val', args)
     ###############################################################################
     
     
@@ -1165,8 +1243,8 @@ def build_dataset2transform(args, image_set):
     # dataset2transform_train = {'MOT17': mot17_train, 'CrowdHuman': crowdhuman_train, 'APPLE_MOTS':applemots_train}
     # dataset2transform_val = {'MOT17': mot17_test, 'CrowdHuman': mot17_test, 'APPLE_MOTS':applemots_val}
     
-    dataset2transform_train = {'MOT17': mot17_train, 'CrowdHuman': crowdhuman_train, 'MOTS':mots_train}
-    dataset2transform_val = {'MOT17': mot17_test, 'CrowdHuman': mot17_test, 'MOTS':mots_val}
+    dataset2transform_train = {'MOT17': mot17_train, 'CrowdHuman': crowdhuman_train, 'MOTS':mots_train, 'LETTUCE_MOTS':lettuce_train}
+    dataset2transform_val = {'MOT17': mot17_test, 'CrowdHuman': mot17_test, 'MOTS':mots_val, 'LETTUCE_MOTS':lettuce_val}
      ###########################################################################################
     
     if image_set == 'train':

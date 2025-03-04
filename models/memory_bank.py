@@ -21,9 +21,10 @@ class MemoryBank(nn.Module):
 
     def _build_layers(self, args, dim_in, hidden_dim, dim_out):
         self.save_thresh = args.memory_bank_score_thresh
-        self.save_period = 3
-        self.max_his_length = args.memory_bank_len
-
+        self.save_period = 5
+        # self.max_his_length = args.memory_bank_len
+        self.max_his_length = 5
+        
         self.save_proj = nn.Linear(dim_in, dim_in)
 
         self.temporal_attn = nn.MultiheadAttention(dim_in, 8, dropout=0)
@@ -123,6 +124,7 @@ class MemoryBank(nn.Module):
         return self._forward_temporal_attn(track_instances)
 
     def forward(self, track_instances: Instances, update_bank=True) -> Instances:
+        # print('TrackInstances in memory bank:', track_instances)
         track_instances = self._forward_temporal_attn(track_instances)
         if update_bank:
             self.update(track_instances)

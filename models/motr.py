@@ -10,7 +10,7 @@ import cv2
 import torch.nn.functional as F
 from torch import nn, Tensor
 from typing import List
-from util.box_ops import masks_to_boxes, normalize_boxes, box_iou, box_cxcywh_to_xyxy
+from util.box_ops import masks_to_boxes, normalize_boxes, box_cxcywh_to_xyxy, box_xyxy_to_cxcywh, box_iou, clamp_batch_boxes, clamp_boxes
 from util import box_ops, checkpoint
 from util.misc import (NestedTensor, nested_tensor_from_tensor_list,
                        accuracy, get_world_size, interpolate, get_rank,
@@ -38,13 +38,14 @@ import code
 from datetime import datetime
 import os
 from util.linear import Linear
-from util.points import get_uncertain_point_coords_with_randomness, point_sample
+from util.points import get_uncertain_point_coords_with_randomness, point_sample,calculate_uncertainty
 from pathlib import Path
 from torch.nn.init import xavier_uniform_
 import torch.nn.init as init
 from util.FPN_encoder import FPNEncoder
 from util.misc import inverse_sigmoid
 import os
+from torchsummary import summary
 os.environ['TORCH_USE_CUDA_DSA'] = '1'
 
 
@@ -173,7 +174,10 @@ class ClipMatcher(SetCriterion):
         loss_giou = 1 - torch.diag(box_ops.generalized_box_iou(
             box_ops.box_cxcywh_to_xyxy(src_boxes[mask]),
             box_ops.box_cxcywh_to_xyxy(target_boxes[mask])))
-        
+        # loss_giou = 1 - torch.diag(box_ops.generalized_box_iou(
+        #     clamp_batch_boxes(box_ops.box_cxcywh_to_xyxy(src_boxes[mask]), outputs['pred_masks'].shape[3], outputs['pred_masks'].shape[2]),
+        #     clamp_batch_boxes(box_ops.box_cxcywh_to_xyxy(target_boxes[mask]), gt_instances[0].masks.shape[2], gt_instances[0].masks.shape[1])))
+
         losses = {}
         losses['loss_bbox'] = loss_bbox.sum() / num_boxes
         losses['loss_giou'] = loss_giou.sum() / num_boxes
@@ -292,8 +296,8 @@ class ClipMatcher(SetCriterion):
                 # Save the figure
                 plt.savefig(filepath)
                 plt.close()
-            
-            
+
+ 
         # Check if all masks in the list are non-empty
         # def create_false_mask_with_size(size, device):
         #     # Adjust the size to ensure it has three dimensions
@@ -345,6 +349,33 @@ class ClipMatcher(SetCriterion):
         #     # Decompose the new list of masks
         #     target_masks, valid = nested_tensor_from_tensor_list(new_masks).decompose()
         ########################################################################################
+        def save_sampled_points_on_masks(src_mask, tgt_mask, uncertain_point_coords, random_point_coords, index=0, output_dir="/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR-mask-trk-QS-MLP/output/point_render"):
+            # Setup plot
+            fig, axs = plt.subplots(1, 2, figsize=(12, 6))
+            titles = ['Predicted Mask', 'Ground Truth Mask']
+            masks = [src_mask[index].squeeze().cpu().numpy(), tgt_mask[index].squeeze().cpu().numpy()]
+            points = [uncertain_point_coords[index].cpu().numpy(), random_point_coords[index].cpu().numpy()]
+            colors = [(1.0, 0.0, 1.0, 0.2), 'green']  # Blue for uncertain, Green for random
+            labels = ['Uncertain', 'Random']
+
+            for ax, mask, title in zip(axs, masks, titles):
+                ax.imshow(mask, cmap='gray')
+                ax.set_title(title)
+                for point_set, color, label in zip(points, colors, labels):
+                    ax.scatter(point_set[:, 0] * mask.shape[1], point_set[:, 1] * mask.shape[0], color=color, s=1, label=label)
+                # ax.legend()
+                ax.axis('off')
+            
+
+            # Save the figure
+            if not os.path.exists(output_dir):
+                os.makedirs(output_dir)
+            filename = f"masks_with_points_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+            plt.tight_layout()
+            plt.savefig(os.path.join(output_dir, filename))
+            plt.close()
+            
+            
         # TODO use valid to mask invalid areas due to padding in loss
         target_masks, valid = nested_tensor_from_tensor_list(masks).decompose()
         target_masks = target_masks.to(src_masks)
@@ -358,19 +389,20 @@ class ClipMatcher(SetCriterion):
         # N x 1 x H x W
         src_masks = src_masks[:, None]
         target_masks = target_masks[:, None]
-
+        
         with torch.no_grad():
             # sample point_coords
-            point_coords = get_uncertain_point_coords_with_randomness(
+            point_coords, uncertian_points_coords, random_points_coords = get_uncertain_point_coords_with_randomness(
                 src_masks,
                 lambda logits: calculate_uncertainty(logits),
+                target_masks,
                 self.num_points,
                 self.oversample_ratio,
                 self.importance_sample_ratio,
             )
-            
+
             # if target_masks.numel() != 0:
-            #     save_sampled_points_on_masks(src_masks, target_masks, point_coords, index=0)
+            #     save_sampled_points_on_masks(src_masks, target_masks, uncertian_points_coords, random_points_coords, index=0)
             
             
             # get gt labels
@@ -385,7 +417,7 @@ class ClipMatcher(SetCriterion):
             point_coords,
             align_corners=False,
         ).squeeze(1)
-        
+        # print("Point logits shape:", point_logits.shape, "Point labels shape:", point_labels.shape)
         losses = {
             # "loss_mask": sigmoid_ce_loss(point_logits, point_labels, num_boxes),
             "loss_dice": dice_loss(point_logits, point_labels, size, num_boxes),
@@ -395,16 +427,6 @@ class ClipMatcher(SetCriterion):
         del target_masks
         return losses
     
-    def autoencoder_loss(self, reconstructed):
-        
-        # Compute MSE loss between predicted and GT boxes (reduction='sum' over individual elements)
-        loss_ae = F.mse_loss(reconstructed['pred_boxes'], reconstructed['input'], reduction='mean')
-
-        losses = {}
-        losses['loss_ae'] = loss_ae 
-
-        return losses
-        
     
     # Add DN for the train
     def prep_for_dn(self,mask_dict):
@@ -445,6 +467,7 @@ class ClipMatcher(SetCriterion):
         track_instances: Instances = outputs_without_aux['track_instances']
         pred_logits_i = track_instances.pred_logits  # predicted logits of i-th image.
         pred_boxes_i = track_instances.pred_boxes  # predicted boxes of i-th image.
+        assert not torch.isnan(pred_boxes_i).any(), "NaN values detected in pred_boxes_i in match_for_single_frame."
         pred_masks_i = track_instances.pred_masks  # predicted masks of i-th image.
         
         obj_idxes = gt_instances_i.obj_ids
@@ -510,11 +533,9 @@ class ClipMatcher(SetCriterion):
         unmatched_outputs = {
             'pred_logits': track_instances.pred_logits[unmatched_track_idxes].unsqueeze(0),
             'pred_boxes': track_instances.pred_boxes[unmatched_track_idxes].unsqueeze(0),
-            
-            # (14) Adding pred_masks
             'pred_masks': track_instances.pred_masks[unmatched_track_idxes].unsqueeze(0),
         }
-        # assert not torch.isnan(unmatched_outputs['pred_boxes']).any(), "NaN found in unmatched_outputs[pred_boxes] in MOTR"
+        assert not torch.isnan(unmatched_outputs['pred_boxes']).any(), "NaN found in unmatched_outputs[pred_boxes] in MOTR"
         # output_dir_unmatched_outputs_bbox = "/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR_mask_DN_DAB/outputs/unmatched_outputs_bbox.txt"
         # with open (output_dir_unmatched_outputs_bbox, 'w') as f:
         #     f.write (str(track_instances.pred_boxes[unmatched_track_idxes]))
@@ -596,7 +617,7 @@ class ClipMatcher(SetCriterion):
         active_track_masks_primarly = track_instances.pred_masks[active_idxes]
         if len(active_track_masks_primarly) > 0: 
             gt_masks = gt_instances_i.masks[track_instances.matched_gt_idxes[active_idxes]].float()
-            plot_and_save_masks(active_idxes, track_instances.pred_masks, gt_masks, gt_boxes, active_track_boxes, '/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR-mask-trk-QS-MLP/output/criterion')
+            plot_and_save_masks(active_idxes, track_instances.pred_masks, gt_masks, gt_boxes, active_track_boxes, '/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR-mask-QS-trk-frozen/output/criterion')
 
         # active_track_masks = active_track_masks.sigmoid()
         # step7. merge the unmatched pairs and the matched pairs.
@@ -701,8 +722,31 @@ class ClipMatcher(SetCriterion):
         return losses
 
 
+# class RuntimeTrackerBase(object):
+#     def __init__(self, score_thresh=0.7, filter_score_thresh=0.6, miss_tolerance=5):
+#         self.score_thresh = score_thresh
+#         self.filter_score_thresh = filter_score_thresh
+#         self.miss_tolerance = miss_tolerance
+#         self.max_obj_id = 0
+
+#     def clear(self):
+#         self.max_obj_id = 0
+
+#     def update(self, track_instances: Instances):
+#         track_instances.disappear_time[track_instances.scores >= self.score_thresh] = 0
+#         for i in range(len(track_instances)):
+#             if track_instances.obj_idxes[i] == -1 and track_instances.scores[i] >= self.score_thresh:
+#                 # print("track {} has score {}, assign obj_id {}".format(i, track_instances.scores[i], self.max_obj_id))
+#                 track_instances.obj_idxes[i] = self.max_obj_id
+#                 self.max_obj_id += 1
+#             elif track_instances.obj_idxes[i] >= 0 and track_instances.scores[i] < self.filter_score_thresh:
+#                 track_instances.disappear_time[i] += 1
+#                 if track_instances.disappear_time[i] >= self.miss_tolerance:
+#                     # Set the obj_id to -1.
+#                     # Then this track will be removed by TrackEmbeddingLayer.
+#                     track_instances.obj_idxes[i] = -1
 class RuntimeTrackerBase(object):
-    def __init__(self, score_thresh=0.3, filter_score_thresh=0.3, miss_tolerance=5):
+    def __init__(self, score_thresh=0.7, filter_score_thresh=0.6, miss_tolerance=5):
         self.score_thresh = score_thresh
         self.filter_score_thresh = filter_score_thresh
         self.miss_tolerance = miss_tolerance
@@ -714,12 +758,12 @@ class RuntimeTrackerBase(object):
     def update(self, track_instances: Instances):
         device = track_instances.obj_idxes.device
         track_instances.disappear_time[track_instances.scores >= self.score_thresh] = 0
-        iou_threshold = 0.0001 # Threshold to consider object the same
+        # iou_threshold_det = 0.15 # Train-Threshold to consider object the same
+        iou_threshold_det = 0.01 # Test-Threshold to consider object the same
         
         for i in range(len(track_instances)):
             if track_instances.obj_idxes[i] == -1 and track_instances.scores[i] >= self.score_thresh:
                 has_overlap = False
-                has_overlap_trk = False
                 
                 # Calculate IoU with all existing tracks that have an ID
                 for j in range(len(track_instances)):
@@ -727,7 +771,7 @@ class RuntimeTrackerBase(object):
                         # print('track_instances.pred_boxes[j:j+1]:', track_instances.pred_boxes[j:j+1], 'track_instances.pred_boxes[i:i+1]:', track_instances.pred_boxes[i:i+1])
                         iou, _= box_iou(box_cxcywh_to_xyxy(track_instances.pred_boxes[j:j+1]), box_cxcywh_to_xyxy(track_instances.pred_boxes[i:i+1]))
                         # print('iou outside:', iou)
-                        if iou >= iou_threshold:
+                        if iou >= iou_threshold_det:
                             # print('iou:',iou)
                             has_overlap = True
                             break
@@ -901,16 +945,16 @@ class MOTR(nn.Module):
             hidden_dim, 
             hidden_dim,
             norm = None) # Initialized
-        self.AxialBlock = AxialBlock(hidden_dim,hidden_dim // 2) # Initialized
+        self.AxialBlock = AxialBlock(hidden_dim,hidden_dim // 2)
         
         # Two-stage prediction heads
-        self.position = nn.Embedding(self.num_queries, 4)
-        self.query_embed = nn.Embedding(self.num_queries, hidden_dim)
-        self.trk_embed = nn.Embedding(1, hidden_dim)
-        self.forward_prediction_heads = self.transformer.forward_prediction_heads
-        self.dn_post_process = self.transformer.dn_post_process
+        # self.position = nn.Embedding(self.num_queries, 4)
+        # self.query_embed = nn.Embedding(self.num_queries, hidden_dim)
+        # self.trk_embed = nn.Embedding(1, hidden_dim)
+        # self.forward_prediction_heads = self.transformer.forward_prediction_heads
+        # self.dn_post_process = self.transformer.dn_post_process
         self.initial_pred = initial_pred
-        nn.init.uniform_(self.position.weight.data, 0, 1)
+        # nn.init.uniform_(self.position.weight.data, 0, 1)
         
 
         self.post_process = TrackerPostProcess()
@@ -922,14 +966,29 @@ class MOTR(nn.Module):
         
     def _generate_empty_tracks(self, frame_shape, device):
         track_instances = Instances((1, 1))
-        num_queries, dim  = self.query_embed.weight.shape
+        num_queries, dim  = self.transformer.query_embed.weight.shape
+
+        # if self.transformer.content_det is None and self.transformer.pos_det is None:
+        #     track_instances.ref_pts = self.position.weight
+        #     track_instances.query_pos = self.query_embed.weight
+        # else:
+        #     track_instances.ref_pts = torch.cat([self.position.weight, self.transformer.pos_det])
+        #     track_instances.query_pos = torch.cat([self.query_embed.weight, self.transformer.content_det + self.trk_embed.weight])
+        assert not torch.isnan(self.transformer.position.weight).any(), "NaN values detected in self.transformer.position.weight."
+        assert not torch.isnan(self.transformer.query_embed.weight).any(), "NaN values detected in self.transformer.query_embed.weight."
+        assert not torch.isnan(self.transformer.trk_embed.weight).any(), "NaN values detected in self.transformer.trk_embed.weight."
+        if self.transformer.content_det is not None:
+            assert not torch.isnan(self.transformer.content_det).any(), "NaN values detected in self.transformer.content_det."
+            assert not torch.isnan(self.transformer.pos_det).any(), "NaN values detected in self.transformer.pos_det."
 
         if self.transformer.content_det is None and self.transformer.pos_det is None:
-            track_instances.ref_pts = self.position.weight
-            track_instances.query_pos = self.query_embed.weight
+            track_instances.ref_pts = self.transformer.position.weight
+            track_instances.query_pos = self.transformer.query_embed.weight
         else:
-            track_instances.ref_pts = torch.cat([self.position.weight, self.transformer.pos_det])
-            track_instances.query_pos = torch.cat([self.query_embed.weight, self.transformer.content_det + self.trk_embed.weight])
+            track_instances.ref_pts = torch.cat([self.transformer.position.weight, self.transformer.pos_det])
+            track_instances.query_pos = torch.cat([self.transformer.query_embed.weight, self.transformer.content_det + self.transformer.trk_embed.weight])
+        assert not torch.isnan(track_instances.ref_pts).any(), "NaN values detected in track_instances.ref_pts."
+        assert not torch.isnan(track_instances.query_pos).any(), "NaN values detected in track_instances.query_pos."   
             
         track_instances.output_embedding = torch.zeros((len(track_instances), dim), device=device)
         track_instances.obj_idxes = torch.full((len(track_instances),), -1, dtype=torch.long, device=device)
@@ -998,12 +1057,31 @@ class MOTR(nn.Module):
         
 
     def _forward_single_image(self, samples, targets, track_instances: Instances):
+        
+        def hook_fn(module, input, output):
+            print(f"Layer: {module.__class__.__name__}")
+            if input and len(input) > 0:
+                print(f"Input shape: {input[0].shape}")
+            else:
+                print("Input is empty")
+            if isinstance(output, tuple):
+                print(f"Output shapes: {[o.shape for o in output if hasattr(o, 'shape')]}")
+            elif hasattr(output, 'shape'):
+                print(f"Output shape: {output.shape}")
+            else:
+                print("Output shape cannot be determined")
+            print(f"Parameters: {sum(p.numel() for p in module.parameters())}")
+
         features, pos = self.backbone(samples)
         src, mask = features[-1].decompose()
         
         # Per-Pixel Decoding
         embeddings, multi_scale_features = self.PerPixelEmbedding(features, (samples.tensors.shape[2], samples.tensors.shape[3]))
-        attention_embedding, similarity_h, similarity_w = self.AxialBlock(embeddings)
+    
+        # for name, layer in self.AxialBlock.named_modules():
+        #     layer.register_forward_hook(hook_fn)
+        # attention_embedding, similarity_h, similarity_w = self.AxialBlock(embeddings)
+        attention_embedding = self.AxialBlock(embeddings)
         
         bs = features[-1].tensors.shape[0]
         assert mask is not None
@@ -1025,7 +1103,7 @@ class MOTR(nn.Module):
                     src = self.input_proj[l](srcs[-1])
                 m = samples.mask
                 mask = F.interpolate(m[None].float(), size=src.shape[-2:]).to(torch.bool)[0]
-                pos_l = self.backbone[1](NestedTensor(src, mask)).to(src.dtype)
+                pos_l = self.backbone[1](NestedTensor(src, mask)).to(src.dtype).to(src.device)
                 srcs.append(src)
                 masks.append(mask)
                 pos.append(pos_l)
@@ -1051,11 +1129,14 @@ class MOTR(nn.Module):
                 assert reference.shape[-1] == 2
                 tmp[..., :2] += reference
             outputs_coord = tmp.sigmoid()
+            # outputs_coord = clamp_boxes(tmp.sigmoid().squeeze(0), samples.tensors.shape[3], samples.tensors.shape[2]).unsqueeze(0).to(samples.tensors.device)
             outputs_classes.append(outputs_class)
             outputs_coords.append(outputs_coord)
             outputs_dynamic_params.append(dynamic_params) # Query embedding
         outputs_class = torch.stack(outputs_classes)
         outputs_coord = torch.stack(outputs_coords)
+        assert not torch.isnan(outputs_coord).any(), "NaN values detected in outputs_coord in _forward_single_image."
+
         outputs_dynamic_params = torch.stack(outputs_dynamic_params)
 
         ref_pts_all = torch.cat([init_reference[:,:,:2].unsqueeze(0), inter_references[:, :, :, :2]], dim=0)
@@ -1073,8 +1154,15 @@ class MOTR(nn.Module):
         #     cross_attended_output = cross_attended_output.unsqueeze(0)
         #     pred_masks = torch.einsum("bqc,bchw->bqhw", cross_attended_output, attention_embedding)
         #     pred_masks = pred_masks.sigmoid()
+        # for name, layer in self.transformer.pos_cross_attention.named_modules():
+        #         layer.register_forward_hook(hook_fn)
+        # print('outputs_dynamic_params:', outputs_dynamic_params.shape, 'F_embeddings:', F_embeddings.shape)
+        # summary_log = summary(self.transformer.pos_cross_attention, input_size=[(outputs_dynamic_params.shape[3:]), (F_embeddings.shape[1:])])
+        # print('summary:', summary_log)
+                      
         for i in range(num_imgs):
             all_layer_masks = []
+            
             for layer_dynamic_params in outputs_dynamic_params:  # Iterate over all layers
                 pos_dynamic_params = layer_dynamic_params[i]
                 cross_attended_output = self.transformer.pos_cross_attention(
@@ -1083,9 +1171,11 @@ class MOTR(nn.Module):
                 ).unsqueeze(0)
                 pred_mask = torch.einsum("bqc,bchw->bqhw", cross_attended_output, attention_embedding)
                 all_layer_masks.append(pred_mask.sigmoid())  # Append current layer's predictions
+                # all_layer_masks.append(pred_mask)
 
             # Stack all layer predictions
             pred_masks = torch.stack(all_layer_masks, dim=0)  # Shape: [num_layers, num_imgs, num_queries, H, W]
+            
     
         # print('pred_masks:', pred_masks[-1].shape, 'outputs_class:', outputs_class.shape, 'outputs_coord:', outputs_coord.shape)   
         out = {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1], 'ref_pts': ref_pts_all[5], 'pred_masks': F.interpolate(
@@ -1118,6 +1208,8 @@ class MOTR(nn.Module):
         track_instances.scores = track_scores
         track_instances.pred_logits = frame_res['pred_logits'][0]
         track_instances.pred_boxes = frame_res['pred_boxes'][0]
+        assert not torch.isnan(track_instances.pred_boxes).any(), "NaN values detected in track_instances.pred_boxes in _post_process_single_image."
+
         track_instances.pred_masks = frame_res['pred_masks'][0]
         track_instances.output_embedding = frame_res['hs'][0]
 
@@ -1132,9 +1224,9 @@ class MOTR(nn.Module):
         if self.memory_bank is not None:
             # print(f"Type of self.memory_bank: {type(self.memory_bank)}")
             track_instances = self.memory_bank(track_instances)
-            out_dir= '/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR-mask-trk-QS/output/trk_inst_mem.txt'
-            with open (out_dir, 'w') as f:
-                f.write(str(track_instances))
+            # out_dir= '/blue/hmedeiros/khademi.zahra/MOTR-train/MOTR_mask_AppleMOTS_train/MOTR-mask-trk-QS/output/trk_inst_mem.txt'
+            # with open (out_dir, 'w') as f:
+            #     f.write(str(track_instances))
             if self.training:
                 self.criterion.calc_loss_for_track_scores(track_instances)
                 
@@ -1180,7 +1272,7 @@ class MOTR(nn.Module):
                                         track_instances=track_instances)
 
         if len(track_instances) > 60:
-            print('Entered if')
+            # print('Entered if')
             res = self._post_process_single_image(res, track_instances, ori_img_size,False)
             track_instances = res['track_instances']
             # print('track instance before QIM:', len(track_instances))
@@ -1196,7 +1288,7 @@ class MOTR(nn.Module):
                 ret['ref_pts'] = ref_pts
             return ret
         else: 
-            print('Entered else')
+            # print('Entered else')
             track_instances = self._generate_empty_tracks(ori_img_size, 'cuda:0')
             res = self._forward_single_image(img,
                                         track_instances=track_instances)
@@ -1291,7 +1383,13 @@ class MOTR(nn.Module):
             else:
                 frame = nested_tensor_from_tensor_list([frame])
                 frame_res = self._forward_single_image(frame, target, track_instances)
-            frame_res = self._post_process_single_image(frame_res, track_instances, frame_shape,is_last)
+            # frame_res = self._post_process_single_image(frame_res, track_instances, frame_shape,is_last)   
+            if len(track_instances) > 60:
+                frame_res = self._post_process_single_image(frame_res, track_instances, frame_shape,is_last)
+            else: 
+                track_instances = self._generate_empty_tracks(frame_shape, device)
+                # frame_res = self._forward_single_image(frame, target, track_instances)
+                frame_res = self._post_process_single_image(frame_res, track_instances, frame_shape,is_last)
         
             track_instances = frame_res['track_instances']
 
@@ -1378,10 +1476,11 @@ def build(args):
         
     # (22) Including masks
     # losses = ['labels', 'boxes']
+
     losses = ['labels', 'boxes', 'masks']
-    importance_sample_ratio = 0.75
-    oversample_ratio = 3.0
-    num_points = 12544
+    importance_sample_ratio = 0.75 # beta
+    oversample_ratio = 3.0 # k
+    num_points = 19004 # 12544×1.515≈19004
     
     dn_losses = []
     dn = False
@@ -1406,4 +1505,35 @@ def build(args):
         use_checkpoint=args.use_checkpoint,
         initial_pred =initial_pred,
     )
+    
+    # # Create a device map
+    # device_map = {}
+    # available_gpus = list(range(torch.cuda.device_count()))
+    # print(f"Available GPUs: {available_gpus}")
+
+    # # Reserved GPUs for specific components
+    # reserved_gpus = [7]  # GPUs reserved for specific tasks
+
+    # # GPUs available for general assignment (exclude reserved GPUs)
+    # general_gpus = [gpu for gpu in available_gpus if gpu not in reserved_gpus]
+
+    # # Assign specific GPUs to critical components
+    # for name, module in model.named_modules():
+    #     # if 'pos_cross_attention' in name:
+    #     #     device_map[name] = 'cuda:6'  
+    #     if 'AxialBlock' in name:
+    #         device_map[name] = 'cuda:7'  
+
+    # # Assign remaining parts of the model to other GPUs
+    # for i, (name, module) in enumerate(model.named_modules()):
+    #     if name not in device_map:  # Check if not already assigned
+    #         # Rotate through the list of general GPUs to distribute the load
+    #         device_map[name] = f'cuda:{general_gpus[i % len(general_gpus)]}'
+
+    # # Move model parts to assigned devices and print the action
+    # for name, module in model.named_modules():
+    #     if name in device_map:
+    #         module.to(device_map[name])
+    #         print(f"{name} moved to {device_map[name]}")
+                 
     return model, criterion, postprocessors
